@@ -243,8 +243,17 @@ def populate_species_and_forms(
 
         evolves_from = species_data.get("evolves_from_species")
         evolution_map[species_id] = extract_id_from_url(evolves_from["url"]) if evolves_from else None
+        shape_data = species_data.get("shape")
+        shape_name = shape_data["name"] if shape_data else None
+        color_data = species_data.get("color")
+        color_name = color_data["name"] if color_data else None
 
-        if session.get(PokemonSpecies, species_id) is not None:
+        existing = session.get(PokemonSpecies, species_id)
+        if existing is not None:
+            if existing.shape != shape_name or existing.color != color_name:
+                existing.shape = shape_name
+                existing.color = color_name
+                session.commit()
             print(f"[{species_id}/{max_species_id}] {species_data['name']} already present, skipping")
             continue
 
@@ -254,6 +263,8 @@ def populate_species_and_forms(
             generation=GENERATION_NAME_TO_INT[species_data["generation"]["name"]],
             is_legendary=species_data["is_legendary"],
             is_mythical=species_data["is_mythical"],
+            shape=shape_name,
+            color=color_name,
         )
         session.add(species)
 

@@ -74,6 +74,11 @@ class PokemonSpecies(Base):
     generation: Mapped[int]
     is_legendary: Mapped[bool] = mapped_column(default=False)
     is_mythical: Mapped[bool] = mapped_column(default=False)
+    # PokeAPI's official body-shape category (quadruped, upright, squiggle, ...) --
+    # authoritative source for locomotion/leg questions, not LLM-inferred.
+    shape: Mapped[str | None]
+    # PokeAPI's official color category (yellow, green, ...) -- same rationale as shape.
+    color: Mapped[str | None]
     evolves_from_species_id: Mapped[int | None] = mapped_column(
         ForeignKey("pokemon_species.species_id")
     )
