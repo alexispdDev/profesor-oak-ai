@@ -3,6 +3,7 @@
 *.db
 *.db-journal
 *.sqlite3
+/pokemon_raw_data/
 
 # Python-generated files
 __pycache__/

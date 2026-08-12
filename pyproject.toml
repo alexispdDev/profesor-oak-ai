@@ -9,7 +9,9 @@ authors = [
 requires-python = ">=3.13"
 dependencies = [
     "alembic==1.18.5",
+    "requests==2.34.2",
     "sqlalchemy==2.0.51",
+    "tqdm>=4.70.0",
 ]
 
 [project.scripts]
