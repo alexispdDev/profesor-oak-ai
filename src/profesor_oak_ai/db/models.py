@@ -117,6 +117,8 @@ class PokemonForm(Base):
     height_m: Mapped[float]
     weight_kg: Mapped[float]
     sprite_url: Mapped[str | None]
+    base_experience: Mapped[int | None]
+    order: Mapped[int | None]
 
     hp: Mapped[int]
     attack: Mapped[int]
@@ -188,6 +190,85 @@ class PokemonEnrichment(Base):
     physical_traits: Mapped[str | None]
     model_name: Mapped[str | None]
     generated_at: Mapped[datetime] = mapped_column(server_default=text("CURRENT_TIMESTAMP"))
+
+
+class Item(Base):
+    __tablename__ = "items"
+
+    item_id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(unique=True)
+
+
+class PokemonHeldItem(Base):
+    __tablename__ = "pokemon_held_items"
+
+    form_id: Mapped[int] = mapped_column(
+        ForeignKey("pokemon_forms.form_id", ondelete="CASCADE"), primary_key=True
+    )
+    item_id: Mapped[int] = mapped_column(
+        ForeignKey("items.item_id", ondelete="CASCADE"), primary_key=True
+    )
+    version_id: Mapped[int] = mapped_column(ForeignKey("game_versions.version_id"), primary_key=True)
+    rarity: Mapped[int]
+
+
+class PokemonGameIndex(Base):
+    __tablename__ = "pokemon_game_indices"
+
+    form_id: Mapped[int] = mapped_column(
+        ForeignKey("pokemon_forms.form_id", ondelete="CASCADE"), primary_key=True
+    )
+    version_id: Mapped[int] = mapped_column(ForeignKey("game_versions.version_id"), primary_key=True)
+    game_index: Mapped[int]
+
+
+class PokemonPastType(Base):
+    __tablename__ = "pokemon_past_types"
+    __table_args__ = (CheckConstraint("slot IN (1, 2)", name="ck_pokemon_past_types_slot"),)
+
+    form_id: Mapped[int] = mapped_column(
+        ForeignKey("pokemon_forms.form_id", ondelete="CASCADE"), primary_key=True
+    )
+    generation: Mapped[int] = mapped_column(primary_key=True)
+    slot: Mapped[int] = mapped_column(primary_key=True)
+    type_id: Mapped[int] = mapped_column(ForeignKey("types.type_id"))
+
+
+class PokemonPastAbility(Base):
+    __tablename__ = "pokemon_past_abilities"
+
+    form_id: Mapped[int] = mapped_column(
+        ForeignKey("pokemon_forms.form_id", ondelete="CASCADE"), primary_key=True
+    )
+    generation: Mapped[int] = mapped_column(primary_key=True)
+    slot: Mapped[int] = mapped_column(primary_key=True)
+    ability_id: Mapped[int] = mapped_column(ForeignKey("abilities.ability_id"))
+    is_hidden: Mapped[bool] = mapped_column(default=False)
+
+
+class PokemonPastStat(Base):
+    __tablename__ = "pokemon_past_stats"
+
+    form_id: Mapped[int] = mapped_column(
+        ForeignKey("pokemon_forms.form_id", ondelete="CASCADE"), primary_key=True
+    )
+    generation: Mapped[int] = mapped_column(primary_key=True)
+    # No CHECK constraint here: past stats can use legacy stat names (e.g. "special",
+    # Gen 1's single stat before it split into special-attack/special-defense in Gen 2)
+    # that aren't among the 6 current stat names used elsewhere in this schema.
+    stat_name: Mapped[str] = mapped_column(primary_key=True)
+    base_stat: Mapped[int]
+    effort: Mapped[int]
+
+
+class PokemonCries(Base):
+    __tablename__ = "pokemon_cries"
+
+    form_id: Mapped[int] = mapped_column(
+        ForeignKey("pokemon_forms.form_id", ondelete="CASCADE"), primary_key=True
+    )
+    latest: Mapped[str | None]
+    legacy: Mapped[str | None]
 
 
 Index("idx_pokemon_forms_species", PokemonForm.species_id)
