@@ -4,6 +4,7 @@
 *.db-journal
 *.sqlite3
 /pokemon_raw_data/
+/data/qdrant/
 
 # Python-generated files
 __pycache__/
