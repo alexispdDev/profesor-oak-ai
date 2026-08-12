@@ -1,0 +1,143 @@
+import json
+
+from profesor_oak_ai.agent import retrieval
+from profesor_oak_ai.db.engine import get_engine, get_session
+
+
+def _coerce_list(value: list[str] | str) -> list[str]:
+    # Some models JSON-encode array arguments as a string instead of a real list.
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return [value]
+    return value
+
+
+def get_pokemon_info(name: str) -> str:
+    """Look up a Pokémon's types, abilities, base stats, and Pokédex lore by name.
+
+    Args:
+        name: The Pokémon's name, e.g. "Pikachu".
+    """
+    session = get_session(get_engine())
+    try:
+        species = retrieval.find_species_by_name(session, name)
+        if species is None:
+            return f"No Pokémon named '{name}' was found in the Pokédex records."
+        return retrieval.describe_pokemon(session, species)
+    finally:
+        session.close()
+
+
+def get_type_effectiveness(attacking_type: str, defending_types: list[str]) -> str:
+    """Compute the damage multiplier of an attacking type against one or two defending types.
+
+    Args:
+        attacking_type: The attacking move's type, e.g. "water".
+        defending_types: One or two defending Pokémon types, e.g. ["fire"] or ["grass", "poison"].
+    """
+    defending_types = _coerce_list(defending_types)
+
+    session = get_session(get_engine())
+    try:
+        factor = retrieval.type_effectiveness(session, attacking_type, defending_types)
+        return f"{attacking_type.title()} vs {'/'.join(defending_types).title()}: x{factor} damage."
+    except ValueError as exc:
+        return str(exc)
+    finally:
+        session.close()
+
+
+def list_pokemon_by_type(pokemon_type: str) -> str:
+    """List Pokémon that have a given type.
+
+    Args:
+        pokemon_type: The type to filter by, e.g. "water".
+    """
+    session = get_session(get_engine())
+    try:
+        names = retrieval.list_pokemon_by_type(session, pokemon_type)
+        if not names:
+            return f"No Pokémon found of type '{pokemon_type}'."
+        return f"Pokémon of type '{pokemon_type}': " + ", ".join(n.title() for n in names)
+    finally:
+        session.close()
+
+
+def search_moves(
+    pokemon_name: str, move_type: str | None = None, learn_method: str | None = None
+) -> str:
+    """List moves a Pokémon can learn, optionally filtered by move type or learn method.
+
+    Args:
+        pokemon_name: The Pokémon's name, e.g. "Charizard".
+        move_type: Optional move type filter, e.g. "fire". Omit for all types.
+        learn_method: Optional learn method filter: "level-up", "machine", "egg", or "tutor".
+    """
+    session = get_session(get_engine())
+    try:
+        moves = retrieval.moves_for_pokemon(session, pokemon_name, move_type, learn_method)
+        if not moves:
+            return f"No matching moves found for '{pokemon_name}'."
+        lines = [
+            f"- {m['name'].title()} ({m['damage_class']}, power={m['power']}, "
+            f"accuracy={m['accuracy']}, via {m['learn_method']}"
+            + (f" at level {m['level']}" if m["learn_method"] == "level-up" else "")
+            + ")"
+            for m in moves
+        ]
+        return "\n".join(lines)
+    finally:
+        session.close()
+
+
+def list_pokemon_by_shape(shapes: list[str], pokemon_type: str | None = None) -> str:
+    """List Pokémon matching one or more official body-shape categories (authoritative
+    Pokédex data, useful for questions about legs, wings, or general body plan).
+
+    IMPORTANT: legless Pokémon are spread across SIX categories, not one -- for any
+    "no legs" / "legless" question, pass all six in a single call:
+    ["ball", "squiggle", "fish", "arms", "blob", "tentacles"].
+
+    Args:
+        shapes: One or more of: "ball" (round, no legs), "squiggle" (serpentine, no legs),
+            "fish" (finned, no legs), "arms" (has arms but no legs), "blob" (amorphous, no
+            legs), "tentacles" (no legs), "upright" (bipedal, 2 legs), "humanoid" (bipedal,
+            2 legs), "quadruped" (4 legs), "legs" (multiple legs, e.g. insectoid), "wings"
+            (winged), "bug-wings" (winged insectoid), "heads" (head only), "armor"
+            (armored/shelled). Pass multiple values to cover a broader question in one call.
+        pokemon_type: Optional type filter, e.g. "water". Omit to search across all types.
+    """
+    shapes = _coerce_list(shapes)
+    session = get_session(get_engine())
+    try:
+        names = retrieval.list_pokemon_by_shape(session, shapes, pokemon_type)
+        if not names:
+            return f"No Pokémon found with body shape(s) {shapes}."
+        return f"Pokémon with body shape(s) {shapes}: " + ", ".join(n.title() for n in names)
+    finally:
+        session.close()
+
+
+TOOLS = [
+    get_pokemon_info,
+    get_type_effectiveness,
+    list_pokemon_by_type,
+    search_moves,
+    list_pokemon_by_shape,
+]
+
+# Prefixes tool functions above use for their "nothing found" results, so callers
+# (the tool-calling loop) can tell a real lookup from an empty one without re-parsing.
+FAILURE_PREFIXES = (
+    "No Pokémon named",
+    "Unknown type:",
+    "No Pokémon found of type",
+    "No matching moves found",
+    "No Pokémon found with body shape",
+)
+
+
+def is_failure(result: str) -> bool:
+    return result.startswith(FAILURE_PREFIXES)
