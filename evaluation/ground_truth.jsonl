@@ -1,0 +1,20 @@
+{"question": "What are bulbasuar's types, abilities, and base stats?", "expected_tool": "get_pokemon_info"}
+{"question": "Tell me about charizrd.", "expected_tool": "get_pokemon_info"}
+{"question": "How effective is a Water-type move against a Fire/Rock Pokemon?", "expected_tool": "get_type_effectiveness"}
+{"question": "What's the damage multiplier of an Electric move against a Ground-type Pokemon?", "expected_tool": "get_type_effectiveness"}
+{"question": "What are Gengar's weaknesses and resistances?", "expected_tool": "get_type_matchups"}
+{"question": "Give me the full type matchup profile for Venusaur.", "expected_tool": "get_type_matchups"}
+{"question": "List all Water-type Pokemon.", "expected_tool": "list_pokemon_by_type"}
+{"question": "Which Pokemon are Psychic type?", "expected_tool": "list_pokemon_by_type"}
+{"question": "Which Pokemon are primarily green?", "expected_tool": "list_pokemon_by_color"}
+{"question": "List all yellow Pokemon.", "expected_tool": "list_pokemon_by_color"}
+{"question": "What moves can Charizard learn by leveling up?", "expected_tool": "search_moves"}
+{"question": "What TM (machine) moves can Bulbasaur learn?", "expected_tool": "search_moves"}
+{"question": "Which Pokemon have a quadruped body shape?", "expected_tool": "list_pokemon_by_shape"}
+{"question": "List Pokemon with no legs at all.", "expected_tool": "list_pokemon_by_shape"}
+{"question": "Where can I find a wild Pikachu?", "expected_tool": "get_pokemon_locations"}
+{"question": "What locations can I catch Zubat in the games?", "expected_tool": "get_pokemon_locations"}
+{"question": "What items can a wild Butterfree be holding?", "expected_tool": "get_held_items"}
+{"question": "Does Meowth hold any items in the wild?", "expected_tool": "get_held_items"}
+{"question": "Is Bulbasaur a Legendary Pokemon?", "expected_tool": null}
+{"question": "What generation is Mewtwo from?", "expected_tool": null}

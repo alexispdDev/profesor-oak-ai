@@ -10,13 +10,15 @@ requires-python = ">=3.13"
 dependencies = [
     "alembic==1.18.5",
     "ollama==0.6.2",
+    "openai==3.0.0",
+    "python-dotenv>=1.2.2",
     "requests==2.34.2",
     "sqlalchemy==2.0.51",
     "tqdm>=4.70.0",
 ]
 
 [project.scripts]
-profesor-oak-ai = "profesor_oak_ai:main"
+profesor-oak-ai = "profesor_oak_ai.agent.cli:main"
 
 [build-system]
 requires = ["uv_build>=0.9.5,<0.10.0"]

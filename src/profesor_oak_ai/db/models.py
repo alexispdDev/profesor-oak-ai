@@ -548,6 +548,43 @@ class SpeciesEvolution(Base):
     evolved_form_id: Mapped[int | None] = mapped_column(ForeignKey("pokemon_forms.form_id"))
 
 
+class Conversation(Base):
+    __tablename__ = "conversations"
+
+    # String (UUID) PK generated in application code, not autoincrement -- needed so
+    # it can be handed back to the caller immediately and referenced later for feedback.
+    conversation_id: Mapped[str] = mapped_column(primary_key=True)
+    question: Mapped[str]
+    answer: Mapped[str]
+    created_at: Mapped[datetime] = mapped_column(server_default=text("CURRENT_TIMESTAMP"))
+
+    # LLM-as-judge relevance classification for this answer, plus token/cost tracking
+    # for both the main answer and the judge call. NULL for conversations logged before
+    # this tracking existed -- there's no way to retroactively recover token usage.
+    relevance: Mapped[str | None]
+    relevance_explanation: Mapped[str | None]
+    prompt_tokens: Mapped[int | None]
+    completion_tokens: Mapped[int | None]
+    total_tokens: Mapped[int | None]
+    cached_tokens: Mapped[int | None]
+    eval_prompt_tokens: Mapped[int | None]
+    eval_completion_tokens: Mapped[int | None]
+    eval_total_tokens: Mapped[int | None]
+    cost: Mapped[float | None]
+
+
+class Feedback(Base):
+    __tablename__ = "feedback"
+    __table_args__ = (CheckConstraint("rating IN (-1, 1)", name="ck_feedback_rating"),)
+
+    feedback_id: Mapped[int] = mapped_column(primary_key=True)
+    conversation_id: Mapped[str] = mapped_column(
+        ForeignKey("conversations.conversation_id", ondelete="CASCADE")
+    )
+    rating: Mapped[int]
+    created_at: Mapped[datetime] = mapped_column(server_default=text("CURRENT_TIMESTAMP"))
+
+
 Index("idx_pokemon_forms_species", PokemonForm.species_id)
 Index("idx_pokemon_types_type", PokemonTypeAssociation.type_id)
 Index("idx_pokemon_moves_move", PokemonMove.move_id)
