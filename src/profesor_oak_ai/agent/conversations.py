@@ -2,6 +2,7 @@ import uuid
 
 from sqlalchemy.orm import Session
 
+from profesor_oak_ai.agent.llm import calculate_cost, evaluate_relevance, run_conversation
 from profesor_oak_ai.db.models import Conversation, Feedback
 
 
@@ -46,3 +47,31 @@ def save_conversation(
 def save_feedback(session: Session, conversation_id: str, rating: int) -> None:
     session.add(Feedback(conversation_id=conversation_id, rating=rating))
     session.commit()
+
+
+def ask_and_log(session: Session, question: str) -> tuple[str, str]:
+    """Runs a conversation, judges relevance, tracks cost, and persists it.
+    Returns (answer, conversation_id). Shared by the CLI and the HTTP API."""
+    result = run_conversation(session, question)
+    relevance_result = evaluate_relevance(question, result.answer)
+    cost = calculate_cost(
+        result.prompt_tokens, result.completion_tokens, result.cached_tokens
+    ) + calculate_cost(
+        relevance_result.prompt_tokens, relevance_result.completion_tokens, relevance_result.cached_tokens
+    )
+    conversation_id = save_conversation(
+        session,
+        question,
+        result.answer,
+        relevance=relevance_result.relevance,
+        relevance_explanation=relevance_result.explanation,
+        prompt_tokens=result.prompt_tokens,
+        completion_tokens=result.completion_tokens,
+        total_tokens=result.total_tokens,
+        cached_tokens=result.cached_tokens,
+        eval_prompt_tokens=relevance_result.prompt_tokens,
+        eval_completion_tokens=relevance_result.completion_tokens,
+        eval_total_tokens=relevance_result.total_tokens,
+        cost=cost,
+    )
+    return result.answer, conversation_id

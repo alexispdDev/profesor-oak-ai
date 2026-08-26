@@ -9,16 +9,19 @@ authors = [
 requires-python = ">=3.13"
 dependencies = [
     "alembic==1.18.5",
+    "fastapi>=0.141.1",
     "ollama==0.6.2",
     "openai==3.0.0",
     "python-dotenv>=1.2.2",
     "requests==2.34.2",
     "sqlalchemy==2.0.51",
     "tqdm>=4.70.0",
+    "uvicorn[standard]>=0.52.4",
 ]
 
 [project.scripts]
 profesor-oak-ai = "profesor_oak_ai.agent.cli:main"
+profesor-oak-ai-api = "profesor_oak_ai.agent.api:main"
 
 [build-system]
 requires = ["uv_build>=0.9.5,<0.10.0"]
