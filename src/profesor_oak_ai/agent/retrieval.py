@@ -6,19 +6,29 @@ from sqlalchemy.orm import Session
 
 from profesor_oak_ai.db.models import (
     Ability,
+    Color,
+    GameVersion,
+    Item,
+    Location,
     Move,
     PokedexEntry,
     PokemonAbility,
+    PokemonColorAssociation,
     PokemonForm,
+    PokemonHeldItem,
+    PokemonLocationEncounter,
     PokemonMove,
+    PokemonShapeAssociation,
     PokemonSpecies,
     PokemonType,
     PokemonTypeAssociation,
+    Shape,
     TypeEfficacy,
 )
 
 MAX_MOVES_RETURNED = 20
 MAX_POKEMON_LISTED = 30
+MAX_LOCATIONS_RETURNED = 20
 
 NO_MATCH_MESSAGE = (
     "No specific Pokémon or type name was recognized in the question. "
@@ -60,6 +70,22 @@ def get_representative_entry(session: Session, species_id: int) -> PokedexEntry 
     )
 
 
+def get_color_name(session: Session, species_id: int) -> str | None:
+    return session.scalar(
+        select(Color.name)
+        .join(PokemonColorAssociation, PokemonColorAssociation.color_id == Color.color_id)
+        .where(PokemonColorAssociation.species_id == species_id)
+    )
+
+
+def get_shape_name(session: Session, species_id: int) -> str | None:
+    return session.scalar(
+        select(Shape.name)
+        .join(PokemonShapeAssociation, PokemonShapeAssociation.shape_id == Shape.shape_id)
+        .where(PokemonShapeAssociation.species_id == species_id)
+    )
+
+
 def describe_pokemon(session: Session, species: PokemonSpecies) -> str:
     form = get_default_form(session, species)
     if form is None:
@@ -80,6 +106,8 @@ def describe_pokemon(session: Session, species: PokemonSpecies) -> str:
     ability_strs = [f"{name}{' (hidden)' if is_hidden else ''}" for name, is_hidden in abilities]
 
     entry = get_representative_entry(session, species.species_id)
+    color_name = get_color_name(session, species.species_id)
+    shape_name = get_shape_name(session, species.species_id)
 
     evolves_from_name = None
     if species.evolves_from_species_id:
@@ -100,10 +128,10 @@ def describe_pokemon(session: Session, species: PokemonSpecies) -> str:
         lines.append("This is a Mythical Pokémon.")
     if evolves_from_name:
         lines.append(f"Evolves from: {evolves_from_name}")
-    if species.shape:
-        lines.append(f"Body shape: {species.shape}")
-    if species.color:
-        lines.append(f"Primary color: {species.color}")
+    if shape_name:
+        lines.append(f"Body shape: {shape_name}")
+    if color_name:
+        lines.append(f"Primary color: {color_name}")
     if entry is not None:
         lines.append(f"Pokédex entry: {entry.entry}")
 
@@ -128,6 +156,43 @@ def type_effectiveness(session: Session, attacking_type: str, defending_types: l
         factor *= row.damage_factor if row is not None else 1.0
 
     return factor
+
+
+def defensive_type_matchups(session: Session, pokemon_name: str) -> dict | None:
+    """For a Pokémon's defending type(s), returns every attacking type's combined
+    damage multiplier (accounting for both types on a dual-typed Pokémon)."""
+    species = find_species_by_name(session, pokemon_name)
+    if species is None:
+        return None
+    form = get_default_form(session, species)
+    if form is None:
+        return None
+
+    defending_types = session.scalars(
+        select(PokemonType.name)
+        .join(PokemonTypeAssociation, PokemonTypeAssociation.type_id == PokemonType.type_id)
+        .where(PokemonTypeAssociation.form_id == form.form_id)
+        .order_by(PokemonTypeAssociation.slot)
+    ).all()
+
+    rows = session.execute(
+        select(PokemonType.name, TypeEfficacy.damage_factor)
+        .join(TypeEfficacy, TypeEfficacy.damage_type_id == PokemonType.type_id)
+        .join(
+            PokemonTypeAssociation,
+            PokemonTypeAssociation.type_id == TypeEfficacy.target_type_id,
+        )
+        .where(PokemonTypeAssociation.form_id == form.form_id)
+    ).all()
+
+    factors: dict[str, float] = {}
+    for attacking_type, damage_factor in rows:
+        factors[attacking_type] = factors.get(attacking_type, 1.0) * damage_factor
+
+    return {"types": list(defending_types), "factors": factors}
+
+
+LEARN_METHOD_PRIORITY = {"level-up": 0, "egg": 1, "tutor": 2, "machine": 3}
 
 
 def moves_for_pokemon(
@@ -162,19 +227,18 @@ def moves_for_pokemon(
     if learn_method:
         query = query.where(PokemonMove.learn_method == learn_method.strip().lower())
 
-    query = query.order_by(PokemonMove.level_learned_at)
     rows = session.execute(query).all()
 
-    # The same move can repeat at different levels across game versions (the schema
-    # doesn't scope learn data by version); keep only the earliest level per move name.
-    seen_names: set[str] = set()
-    results = []
+    # The same (move, learn_method) pair can repeat at different levels across game
+    # versions (the schema doesn't scope learn data by version) -- keep only the
+    # earliest level per (name, learn_method), NOT per name alone. Deduping by name
+    # alone would let a move's level-less machine/egg/tutor entry (level_learned_at
+    # defaults to 0) silently suppress its level-up entry, hiding real level data.
+    best: dict[tuple[str, str], dict] = {}
     for row in rows:
-        if row.name in seen_names:
-            continue
-        seen_names.add(row.name)
-        results.append(
-            {
+        key = (row.name, row.learn_method)
+        if key not in best or row.level_learned_at < best[key]["level"]:
+            best[key] = {
                 "name": row.name,
                 "damage_class": row.damage_class,
                 "power": row.power,
@@ -182,11 +246,73 @@ def moves_for_pokemon(
                 "learn_method": row.learn_method,
                 "level": row.level_learned_at,
             }
-        )
-        if len(results) >= MAX_MOVES_RETURNED:
-            break
 
-    return results
+    # Level-up moves first (in level order), then egg/tutor/machine -- otherwise,
+    # when no learn_method filter is given, TM/egg/tutor entries (level_learned_at=0)
+    # would sort before every level-up move and crowd the capped result out entirely.
+    results = sorted(
+        best.values(),
+        key=lambda m: (LEARN_METHOD_PRIORITY.get(m["learn_method"], 99), m["level"], m["name"]),
+    )
+    return results[:MAX_MOVES_RETURNED]
+
+
+def locations_for_pokemon(
+    session: Session, species_name: str, version: str | None = None
+) -> list[dict]:
+    species = find_species_by_name(session, species_name)
+    if species is None:
+        return []
+    form = get_default_form(session, species)
+    if form is None:
+        return []
+
+    query = (
+        select(
+            Location.name.label("location"),
+            GameVersion.name.label("version"),
+            func.min(PokemonLocationEncounter.min_level).label("min_level"),
+            func.max(PokemonLocationEncounter.max_level).label("max_level"),
+        )
+        .join(PokemonLocationEncounter, PokemonLocationEncounter.location_id == Location.location_id)
+        .join(GameVersion, GameVersion.version_id == PokemonLocationEncounter.version_id)
+        .where(PokemonLocationEncounter.form_id == form.form_id)
+        .group_by(Location.location_id, GameVersion.version_id)
+    )
+    if version:
+        query = query.where(func.lower(GameVersion.name) == version.strip().lower())
+    query = query.order_by(Location.name).limit(MAX_LOCATIONS_RETURNED)
+
+    rows = session.execute(query).all()
+    return [
+        {"location": r.location, "version": r.version, "min_level": r.min_level, "max_level": r.max_level}
+        for r in rows
+    ]
+
+
+def held_items_for_pokemon(session: Session, species_name: str) -> list[dict]:
+    species = find_species_by_name(session, species_name)
+    if species is None:
+        return []
+    form = get_default_form(session, species)
+    if form is None:
+        return []
+
+    query = (
+        select(Item.name.label("item"), PokemonHeldItem.rarity)
+        .join(PokemonHeldItem, PokemonHeldItem.item_id == Item.item_id)
+        .where(PokemonHeldItem.form_id == form.form_id)
+        .order_by(Item.name)
+    )
+    rows = session.execute(query).all()
+
+    # The same item/rarity typically repeats across many game versions; collapse to one
+    # row per item (first-seen rarity) rather than listing every version, matching how
+    # moves_for_pokemon collapses cross-version repetition.
+    items: dict[str, int] = {}
+    for row in rows:
+        items.setdefault(row.item, row.rarity)
+    return [{"item": name, "rarity": rarity} for name, rarity in items.items()]
 
 
 def _mentions(text: str, candidates: list[str]) -> list[str]:
@@ -235,11 +361,28 @@ def list_pokemon_by_type(session: Session, type_name: str) -> list[str]:
     return list(names)
 
 
+def list_pokemon_by_color(session: Session, color_name: str) -> list[str]:
+    names = session.scalars(
+        select(PokemonSpecies.name)
+        .join(PokemonColorAssociation, PokemonColorAssociation.species_id == PokemonSpecies.species_id)
+        .join(Color, Color.color_id == PokemonColorAssociation.color_id)
+        .where(func.lower(Color.name) == color_name.strip().lower())
+        .order_by(PokemonSpecies.species_id)
+        .limit(MAX_POKEMON_LISTED)
+    ).all()
+    return list(names)
+
+
 def list_pokemon_by_shape(
     session: Session, shapes: list[str], pokemon_type: str | None = None
 ) -> list[str]:
     shapes_lower = [s.strip().lower() for s in shapes]
-    query = select(PokemonSpecies.name).where(func.lower(PokemonSpecies.shape).in_(shapes_lower))
+    query = (
+        select(PokemonSpecies.name)
+        .join(PokemonShapeAssociation, PokemonShapeAssociation.species_id == PokemonSpecies.species_id)
+        .join(Shape, Shape.shape_id == PokemonShapeAssociation.shape_id)
+        .where(func.lower(Shape.name).in_(shapes_lower))
+    )
     if pokemon_type:
         query = (
             query.join(PokemonForm, PokemonForm.species_id == PokemonSpecies.species_id)

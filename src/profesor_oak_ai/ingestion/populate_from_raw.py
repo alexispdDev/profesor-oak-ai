@@ -1,5 +1,4 @@
 import json
-from pathlib import Path
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -19,9 +18,13 @@ from profesor_oak_ai.db.models import (
     PokemonSpecies,
     PokemonType,
 )
-from profesor_oak_ai.ingestion.populate import GENERATION_NAME_TO_INT, english_text, load_name_id_map
-
-RAW_DATA_DIR = Path("pokemon_raw_data")
+from profesor_oak_ai.ingestion.populate import (
+    GENERATION_NAME_TO_INT,
+    RAW_DATA_DIR,
+    get_or_create_ability,
+    load_name_id_map,
+    load_offline_lookup,
+)
 
 
 def build_form_lookup(session: Session) -> dict[str, int]:
@@ -36,31 +39,6 @@ def build_form_lookup(session: Session) -> dict[str, int]:
         (species_name if form_name is None else f"{species_name}-{form_name}"): form_id
         for form_id, form_name, species_name in rows
     }
-
-
-def load_offline_lookup(path: Path) -> dict[str, dict]:
-    lookup = {}
-    with open(path, encoding="utf-8") as f:
-        for line in f:
-            data = json.loads(line)
-            lookup[data["name"]] = data
-    return lookup
-
-
-def get_or_create_ability_offline(
-    session: Session, cache: dict[str, int], offline_abilities: dict[str, dict], name: str
-) -> int | None:
-    if name in cache:
-        return cache[name]
-    data = offline_abilities.get(name)
-    if data is None:
-        return None
-    description = english_text(data.get("effect_entries", []), "short_effect", "effect")
-    ability = Ability(name=name, description=description)
-    session.add(ability)
-    session.flush()
-    cache[name] = ability.ability_id
-    return ability.ability_id
 
 
 def get_or_create_item_offline(
@@ -146,7 +124,7 @@ def insert_past_abilities(
         for a in entry["abilities"]:
             if a["ability"] is None:
                 continue
-            ability_id = get_or_create_ability_offline(
+            ability_id = get_or_create_ability(
                 session, ability_cache, offline_abilities, a["ability"]["name"]
             )
             if ability_id is None:
