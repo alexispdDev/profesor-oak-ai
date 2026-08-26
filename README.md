@@ -19,6 +19,225 @@ Instead of relying solely on the LLM's pre-trained memory, this system grounds i
 
 * **Battle & Tactical Advice**: Offers accurate team-building suggestions and type match-up strategies using verified stat data.
 
-* **Lore Search**: Answers questions about Pokémon origins, legendaries, and regional lore straight from canonical descriptions.
+* **Canonical Pokédex Lore**: Surfaces official in-game descriptions for a named Pokémon, straight from canonical Pokédex entries.
 
-* **Hybrid Retrieval**: Uses keyword search (for exact names and stats) alongside vector embeddings (for semantic lore queries) to keep answers accurate and hallucination-free.
+* **Structured Retrieval**: Uses keyword/name matching against a curated SQL database to keep answers grounded and hallucination-free.
+
+## Architecture
+
+```mermaid
+flowchart TD
+    RawData["PokeAPI raw dump<br/>pokemon_raw_data/*.jsonl"]
+    Ingestion["Ingestion pipeline<br/>13 scripts (fetch + 12 populate_*.py)"]
+    DB[("SQLite<br/>data/pokedex.db<br/>42 tables")]
+    Retrieval["retrieval.py<br/>SQLAlchemy queries"]
+    Tools["tools.py<br/>9 LLM-callable tools"]
+    LLM["llm.py<br/>OpenAI tool-calling loop"]
+    CLI["cli.py<br/>interactive + one-shot"]
+    API["api.py<br/>FastAPI (/question, /feedback)"]
+    Conv["conversations.py<br/>ask_and_log + feedback"]
+    Eval["evaluation/<br/>ground truth + LLM-judge"]
+    User["User"]
+
+    RawData --> Ingestion --> DB
+    DB --> Retrieval --> Tools --> LLM
+    Retrieval -.baseline context.-> LLM
+    User --> CLI --> Conv
+    User --> API --> Conv
+    Conv --> LLM --> Conv
+    Conv --> DB
+    DB -.-> Eval
+    LLM -.-> Eval
+
+    style DB fill:#336791,color:#fff
+    style LLM fill:#10a37f,color:#fff
+    style Eval fill:#f46800,color:#fff
+```
+
+Every question first gets a baseline context block injected automatically (`retrieve_context`, a keyword/name match against the question text — no LLM call needed for this step), then goes through an OpenAI tool-calling loop that can call any of 9 tools to fetch more specific data before answering. `cli.py` and `api.py` are both thin callers around the same `conversations.ask_and_log()` orchestration, so every conversation and any user feedback (+1/-1) gets persisted identically to the same SQLite database the agent reads from, regardless of which interface was used.
+
+## Quickstart
+
+```bash
+uv sync
+echo "OPENAI_API_KEY=sk-..." >> .env
+
+# build the database (fetches the PokeAPI dump once, then ingests it offline)
+uv run alembic upgrade head
+uv run python -m profesor_oak_ai.ingestion.fetch_raw_data
+uv run python -m profesor_oak_ai.ingestion.populate --max-species-id 151
+uv run python -m profesor_oak_ai.ingestion.populate_from_raw
+uv run python -m profesor_oak_ai.ingestion.populate_colors
+uv run python -m profesor_oak_ai.ingestion.populate_habitats
+uv run python -m profesor_oak_ai.ingestion.populate_shapes
+uv run python -m profesor_oak_ai.ingestion.populate_growth_rates
+uv run python -m profesor_oak_ai.ingestion.populate_egg_groups
+uv run python -m profesor_oak_ai.ingestion.populate_evolutions
+uv run python -m profesor_oak_ai.ingestion.populate_natures
+uv run python -m profesor_oak_ai.ingestion.populate_characteristics
+uv run python -m profesor_oak_ai.ingestion.populate_form_triggers
+uv run python -m profesor_oak_ai.ingestion.populate_location_encounters
+
+uv run profesor-oak-ai
+```
+
+Or start the HTTP API instead of the CLI:
+```bash
+uv run profesor-oak-ai-api
+# or, for auto-reload during development:
+uv run uvicorn profesor_oak_ai.agent.api:app --reload
+
+curl -X POST localhost:8000/question \
+  -H 'content-type: application/json' \
+  -d '{"question": "What are Bulbasaur'"'"'s types and abilities?"}'
+```
+Interactive Swagger docs are served at `localhost:8000/docs`.
+
+### Or run everything in Docker
+
+```bash
+echo "OPENAI_API_KEY=sk-..." >> .env
+docker compose up --build
+```
+The container's `entrypoint.sh` runs the same steps as the manual Quickstart above (fetch the raw dump if `pokemon_raw_data/` is empty, apply migrations, populate the database if `data/pokedex.db` doesn't exist yet) before starting the API on `localhost:8000`. `data/` and `pokemon_raw_data/` are bind-mounted from the host, so a first run builds the database once and every subsequent `docker compose up` reuses it and starts almost instantly; deleting either directory forces a rebuild, same as the non-Docker workflow.
+
+Run the CLI through the same image instead:
+```bash
+docker compose run --rm -it app profesor-oak-ai            # interactive
+docker compose run --rm app profesor-oak-ai "What are Bulbasaur's types and abilities?"  # one-shot
+```
+
+### Prerequisites
+
+- Python 3.13
+- [uv](https://docs.astral.sh/uv/) for dependency management
+- An OpenAI API key
+
+The ingestion scripts are idempotent (safe to re-run; each one skips rows it's already inserted) and offline after the one `fetch_raw_data` step — everything else reads only from the `pokemon_raw_data/` dump, no further network access. `data/pokedex.db` is gitignored and disposable: delete it and re-run the steps above to rebuild from scratch.
+
+## Testing
+
+There is no automated test suite (see [Limitations](#limitations)) — the CLI is the primary way to exercise the application, alongside the evaluation harness below.
+
+Interactive mode:
+```bash
+uv run profesor-oak-ai
+```
+
+One-shot mode (answers a single question and exits, script-friendly):
+```bash
+uv run profesor-oak-ai "What are Bulbasaur's types and abilities?"
+```
+
+Example:
+```
+> How effective is a Water-type move against a Fire/Rock Pokémon?
+Water is 4x effective against a Fire/Rock-type Pokémon...
+```
+
+In interactive mode, after each answer you're prompted to rate it `+1`/`-1` (or press Enter to skip) — this gets saved to the `feedback` table alongside the `conversations` table's record of the question and answer.
+
+Every conversation, in both interactive and one-shot mode, is also run through the same LLM-as-judge relevance check used by the evaluation harness below, and has its token usage and USD cost tracked (`relevance`, token counts, `cost`, etc. on the `conversations` table) — not just conversations logged during an eval run. The same is true of the HTTP API's `POST /question`, since both interfaces call the same `conversations.ask_and_log()`.
+
+### HTTP API
+
+```bash
+uv run profesor-oak-ai-api
+```
+
+- `POST /question` — body `{"question": "..."}`, returns `{"conversation_id": "...", "answer": "..."}`.
+- `POST /feedback` — body `{"conversation_id": "...", "feedback": 1}` (or `-1`), returns `204`. Any other value is rejected with `422` before it reaches the database.
+- `GET /health` — liveness check.
+- `GET /dashboard` — a small monitoring page (conversation/cost totals, relevance breakdown, daily activity, recent conversations with feedback), reading directly from the `conversations`/`feedback` tables. See [Monitoring](#monitoring) below.
+
+## Evaluation
+
+### Retrieval and RAG evaluation
+
+This project's retrieval isn't a single ranked-index lookup (like a vector or TF-IDF search) — the agent *chooses which of 9 tools to call* via OpenAI tool-calling, on top of an automatically-injected baseline context. So the two metrics are adapted accordingly:
+
+- **Retrieval accuracy**: for a ground-truth question with a known expected tool, was that tool actually invoked?
+- **RAG evaluation**: an LLM-as-judge call classifies the final answer as `RELEVANT`, `PARTLY_RELEVANT`, or `NON_RELEVANT`.
+
+Ground truth: 20 hand-written questions, ~2 per tool, in [`evaluation/ground_truth.jsonl`](evaluation/ground_truth.jsonl). Run the harness with:
+```bash
+uv run python -m profesor_oak_ai.evaluation.run_eval
+```
+
+Latest results ([`evaluation/results.csv`](evaluation/results.csv)):
+
+- **Retrieval accuracy: 18/18 (100%)** of questions with a known expected tool actually triggered it.
+- **RAG relevance: 15/20 (75%) RELEVANT, 5/20 (25%) PARTLY_RELEVANT**, 0 NON_RELEVANT.
+
+The `PARTLY_RELEVANT` cases are mostly the agent correctly reporting a truncated or non-exhaustive list (type/color/shape listings are capped at 30 results by design, and the judge sometimes marks an accurate-but-partial list down for incompleteness) — arguably a labeling artifact of the ground truth, not a real quality issue. Relevance is judged by a fresh LLM call on every run, so this breakdown shifts slightly from run to run (an earlier run classified Gengar's Psychic-weakness explanation as `PARTLY_RELEVANT` because the judge itself was factually wrong about typing interactions); LLM-as-judge evaluation being fallible in this way is a known limitation (see [Limitations](#limitations)).
+
+## Monitoring
+
+```bash
+uv run profesor-oak-ai-api
+# then open http://localhost:8000/dashboard
+```
+
+A small server-rendered dashboard, reading live from the same `conversations`/`feedback` tables every CLI and API call writes to (`agent/dashboard.py`, no separate ETL or export step):
+
+- Summary cards: total conversations, total cost (USD), average tokens/conversation, feedback totals (+1/-1)
+- Relevance breakdown (`RELEVANT`/`PARTLY_RELEVANT`/`NON_RELEVANT`/`UNKNOWN`, plus "Not judged" for conversations logged before relevance tracking existed)
+- Daily activity: conversations and cost per day, last 14 days
+- Recent conversations table, with relevance, cost, and feedback per row
+
+No new service or dependency — it's one FastAPI route rendering plain HTML with inline CSS (see [Decisions and trade-offs](#decisions-and-trade-offs) for why this was chosen over Grafana).
+
+## Decisions and trade-offs
+
+- **SQL/keyword retrieval over vector embeddings**: this project used Qdrant + Ollama embeddings for semantic lore search earlier on, then removed it. The dataset is fully structured (a relational Pokédex, not free-text documents), so exact/fuzzy name and keyword matching against SQL columns covers the real query patterns without the operational overhead of an embedding store.
+- **SQLite over Postgres**: conversation/feedback logging reuses the same SQLite database the ingestion pipeline already builds, rather than adding a second database engine — nothing else in this project needs Postgres's concurrency/networking features.
+- **Gen 1-only ingestion scope** (`--max-species-id 151`): the ingestion pipeline can be pointed at more species, but every design decision (which evolution-condition fields to model, which Pokédexes to store numbers for, which type-chart generation to treat as historical) was scoped and verified against Gen 1 specifically. Raising the scope is possible but would need re-auditing several of those decisions.
+- **Past-data tables, not overwritten current data**: where PokeAPI's data changed across generations (type effectiveness, ability availability), the current/modern values are kept as the primary table and historical deltas are stored in separate `Past*` tables (mirroring an existing schema pattern for past types/abilities/stats), rather than overwriting current data or picking one era as canonical.
+- **`ask()`/`run_conversation()` kept persistence- and evaluation-agnostic**: the core question-answering functions have no knowledge of conversation logging or evaluation. Persistence, judging, and cost tracking live in `conversations.ask_and_log()`, one shared orchestration function that both `cli.py` and `api.py` call — this is what let the HTTP API get added as a thin new caller instead of a rewrite.
+- **FastAPI over Flask for the HTTP API**: the fitness-assistant reference project uses Flask, but this project picked FastAPI instead for built-in request validation (Pydantic) and automatic OpenAPI/Swagger docs (`/docs`), at the cost of diverging from the example's stack.
+- **Bind-mounted `data/`/`pokemon_raw_data/` over named Docker volumes**: this is a single-container, single-machine SQLite setup, not a multi-host deployment, so there's no benefit to hiding the database inside Docker-managed storage. Bind-mounting lets a container reuse whatever's already built on the host (instant startup) and lets a fresh build's output be inspected from outside Docker too.
+- **One idempotent `entrypoint.sh` for both the API and CLI**: it checks for existing data, fetches/migrates/populates only what's missing (reusing the exact Quickstart command list, not a re-derived one), then `exec`s whatever command was passed in — so `docker compose up` (the API) and `docker compose run app profesor-oak-ai ...` (the CLI) share one bootstrap path instead of two.
+- **Built-in HTML dashboard over Grafana**: the fitness-assistant reference project uses Grafana against Postgres. This project's data lives in SQLite, and Grafana's SQLite support is an unsigned community plugin rather than a first-class data source — adding it (plus a new docker-compose service) for a handful of read-only aggregate queries was more infra than the payoff justified. A single FastAPI route querying the existing tables directly avoids that fragility, at the cost of a less polished/interactive UI than Grafana would give. Note that per-tool usage (which of the 9 tools got called) isn't a metric this dashboard can show, since that's never persisted per conversation — only the final answer, relevance, and token/cost counts are.
+
+## Project structure
+
+```text
+src/profesor_oak_ai/
+  agent/
+    cli.py            # Interactive + one-shot CLI
+    api.py             # FastAPI HTTP API (/question, /feedback, /health)
+    llm.py             # OpenAI tool-calling loop (run_conversation/ask) + LLM-as-judge
+    prompts.py          # System prompt (Professor Oak persona + grounding rules)
+    retrieval.py         # Read-only SQLAlchemy queries backing the tools
+    tools.py            # 9 LLM-callable tools, wraps retrieval.py
+    conversations.py      # ask_and_log() shared by cli.py/api.py + feedback persistence
+    dashboard.py         # Queries + HTML for GET /dashboard
+  db/
+    engine.py           # SQLite engine/session setup
+    models.py            # SQLAlchemy models -- 42 tables
+  ingestion/            # 13 scripts that build the database from the raw PokeAPI dump
+  evaluation/
+    run_eval.py          # Ground-truth-driven retrieval + RAG evaluation harness
+evaluation/
+  ground_truth.jsonl      # 20 hand-written evaluation questions
+  results.csv            # Latest evaluation run's output
+pokemon_raw_data/         # Raw PokeAPI dump (fetched once, offline after that)
+alembic/versions/         # 25 migrations tracking the schema's evolution
+data/pokedex.db          # SQLite database (gitignored, rebuilt from the steps above)
+ingestion_gaps.txt        # Detailed field-by-field ingestion audit notes
+agent_tool_gaps.txt       # Tracked tool ideas not yet built
+Dockerfile               # uv-based image, serves the HTTP API by default
+docker-compose.yml        # Bind-mounts data/ + pokemon_raw_data/, publishes port 8000
+entrypoint.sh             # Fetches/migrates/populates only what's missing, then execs the CMD
+```
+
+## Limitations
+
+- **No automated test suite** — verification throughout development has been direct functional testing (running the CLI, querying the database, and the evaluation harness above) rather than a `pytest` suite.
+- **No web UI** — the CLI and the HTTP API (`api.py`) are the only interfaces; no frontend.
+- **No per-tool usage tracking** — `GET /dashboard` can't show "most-used tool" or similar, because which of the 9 tools got called per conversation is never persisted (only used transiently during the request); would need a schema change to track.
+- **Gen 1 species only** by default (`--max-species-id 151`) — the ingestion pipeline can be pointed at more species, but several data-modeling decisions were specifically scoped and verified against Gen 1 (see [Decisions and trade-offs](#decisions-and-trade-offs)).
+- **LLM-as-judge evaluation is itself fallible** — see the Evaluation section above; at least one `PARTLY_RELEVANT` result across evaluation runs has been the judge being factually wrong, not the system under test.
+- **No localization** — only English text is stored anywhere in the schema, even though the raw PokeAPI dump has many languages.
+- **Competitive/team-building judgments are out of reach by design** — the database can answer "what does this ability do" but not "is this a good competitive pick"; that kind of tier/usage data has no source in PokeAPI at all (see `ingestion_gaps.txt`'s "Explicitly out of scope" notes).
+- A full, continuously-updated account of known data gaps and scope decisions lives in [`ingestion_gaps.txt`](ingestion_gaps.txt) (data coverage) and [`agent_tool_gaps.txt`](agent_tool_gaps.txt) (tool coverage) — both are more granular and current than this section.
