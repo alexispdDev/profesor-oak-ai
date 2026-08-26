@@ -1,10 +1,11 @@
 from typing import Literal
 
 from fastapi import Depends, FastAPI, HTTPException
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from profesor_oak_ai.agent import conversations
+from profesor_oak_ai.agent import conversations, dashboard
 from profesor_oak_ai.db.engine import get_engine, get_session
 
 engine = get_engine()
@@ -51,6 +52,11 @@ def ask_question(request: QuestionRequest, session: Session = Depends(get_db)):
 @app.post("/feedback", status_code=204)
 def submit_feedback(request: FeedbackRequest, session: Session = Depends(get_db)):
     conversations.save_feedback(session, request.conversation_id, request.feedback)
+
+
+@app.get("/dashboard", response_class=HTMLResponse)
+def get_dashboard(session: Session = Depends(get_db)):
+    return dashboard.render_dashboard_html(session)
 
 
 def main() -> None:
