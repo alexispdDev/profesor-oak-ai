@@ -2,11 +2,6 @@ import json
 
 from profesor_oak_ai.agent import retrieval
 from profesor_oak_ai.db.engine import get_engine, get_session
-from profesor_oak_ai.vectorstore.client import COLLECTION_NAME, get_qdrant_client
-from profesor_oak_ai.vectorstore.embeddings import embed_text
-
-LORE_SEARCH_LIMIT = 5
-LORE_SCORE_THRESHOLD = 0.5
 
 
 def _coerce_list(value: list[str] | str) -> list[str]:
@@ -222,32 +217,6 @@ def get_held_items(pokemon_name: str) -> str:
         session.close()
 
 
-def search_pokemon_lore(query: str) -> str:
-    """Semantically search Pokédex lore/flavor text for Pokémon matching a descriptive or
-    thematic query -- use this for questions that name-based or structured lookups can't
-    answer, e.g. "which Pokémon is described as sleeping in sunlight" or "a creature that
-    stores electricity in its cheeks". Not for exact name lookups (use get_pokemon_info)
-    or structured filters like type/shape (use the list_pokemon_by_* tools).
-
-    Args:
-        query: A natural-language description of the trait, theme, or behavior to search for.
-    """
-    client = get_qdrant_client()
-    vector = embed_text(query)
-    results = client.query_points(
-        collection_name=COLLECTION_NAME,
-        query=vector,
-        limit=LORE_SEARCH_LIMIT,
-        score_threshold=LORE_SCORE_THRESHOLD,
-    ).points
-
-    if not results:
-        return f"No Pokémon lore found matching '{query}'."
-
-    lines = [f"- {r.payload['name'].title()}: {r.payload['entry']}" for r in results]
-    return "\n".join(lines)
-
-
 TOOLS = [
     get_pokemon_info,
     get_type_effectiveness,
@@ -258,7 +227,6 @@ TOOLS = [
     list_pokemon_by_shape,
     get_pokemon_locations,
     get_held_items,
-    search_pokemon_lore,
 ]
 
 # Prefixes tool functions above use for their "nothing found" results, so callers
@@ -272,7 +240,6 @@ FAILURE_PREFIXES = (
     "No Pokémon found with body shape",
     "No known wild locations found",
     "No known held items found",
-    "No Pokémon lore found matching",
 )
 
 
