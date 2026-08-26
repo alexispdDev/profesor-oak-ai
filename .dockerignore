@@ -1,0 +1,10 @@
+.venv
+.env
+data/
+pokemon_raw_data/
+.git
+__pycache__/
+*.pyc
+.pytest_cache/
+ingestion_gaps.txt
+agent_tool_gaps.txt
