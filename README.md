@@ -41,9 +41,9 @@ flowchart TD
 
     RawData --> Ingestion --> DB
     DB --> Retrieval --> Tools --> LLM
-    DB -.direct query, team_builder.py.-> Tools
+    DB -.direct query via team_builder.-> Tools
     Retrieval -.baseline context.-> LLM
-    Tools -.narration call, team_agent.py.-> LLM
+    Tools -.narration call via team_agent.-> LLM
     User --> CLI --> Conv
     User --> API --> Conv
     Conv --> LLM --> Conv
