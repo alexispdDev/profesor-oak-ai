@@ -41,7 +41,9 @@ flowchart TD
 
     RawData --> Ingestion --> DB
     DB --> Retrieval --> Tools --> LLM
+    DB -.direct query, team_builder.py.-> Tools
     Retrieval -.baseline context.-> LLM
+    Tools -.narration call, team_agent.py.-> LLM
     User --> CLI --> Conv
     User --> API --> Conv
     Conv --> LLM --> Conv
@@ -54,7 +56,7 @@ flowchart TD
     style Eval fill:#f46800,color:#fff
 ```
 
-Every question first gets a baseline context block injected automatically (`retrieve_context`, a keyword/name match against the question text — no LLM call needed for this step), then goes through an OpenAI tool-calling loop that can call any of 19 tools to fetch more specific data before answering. `cli.py` and `api.py` are both thin callers around the same `conversations.ask_and_log()` orchestration, so every conversation gets persisted identically to the same SQLite database the agent reads from, regardless of which interface was used.
+Every question first gets a baseline context block injected automatically (`retrieve_context`, a keyword/name match against the question text — no LLM call needed for this step), then goes through an OpenAI tool-calling loop that can call any of 19 tools to fetch more specific data before answering. Most tools go through `retrieval.py`, but the team-building tool (`build_team`) is its own self-contained pipeline: `team_builder.py` queries the database directly (not through `retrieval.py`) and `team_agent.py` deterministically assembles a full roster, making its own separate OpenAI call at the very end just to narrate the already-decided result in prose — a second, independent LLM call site nested inside the outer tool-calling loop, not a call back into it. `cli.py` and `api.py` are both thin callers around the same `conversations.ask_and_log()` orchestration, so every conversation gets persisted identically to the same SQLite database the agent reads from, regardless of which interface was used.
 
 ## Quickstart
 
@@ -169,8 +171,9 @@ A small server-rendered dashboard, reading live from the same `conversations` ta
 
 - Summary cards: total conversations, total cost (USD), average tokens/conversation
 - Relevance breakdown (`RELEVANT`/`PARTLY_RELEVANT`/`NON_RELEVANT`/`UNKNOWN`, plus "Not judged" for conversations logged before relevance tracking existed)
+- Grounding breakdown: how each answer's subject got confirmed real — `context` (the automatic baseline retrieval), `tool` (a name-resolving tool call), or `none` (never grounded, worth checking for hallucinated subjects that slipped past rule 3), plus "Not tracked" for conversations logged before grounding tracking existed
 - Daily activity: conversations and cost per day, last 14 days
-- Recent conversations table, with relevance and cost per row
+- Recent conversations table, with relevance, grounding source, and cost per row
 
 No new service or dependency — it's one FastAPI route rendering plain HTML with inline CSS (see [Decisions and trade-offs](#decisions-and-trade-offs) for why this was chosen over Grafana).
 
