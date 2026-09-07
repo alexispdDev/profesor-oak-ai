@@ -23,6 +23,17 @@ MODEL = os.environ.get("OPENAI_MODEL", "gpt-5.4-mini")
 
 NO_INFO_RESPONSE = "My current Pokédex records do not have sufficient information on that topic."
 
+REWRITE_PROMPT = """Rewrite the user's question below so it's clearer and more specific for
+looking up in a Generation-1 Pokémon database -- expand vague shorthand, spell out an
+implied subject, and fix an obvious typo, but do NOT change what's being asked and do NOT
+alter, "correct", or paraphrase any named Pokémon, move, item, or place -- copy those
+exactly as given, even if they look misspelled (a rewrite that "fixes" a real name into a
+different real name would silently change the question). If the question is already clear,
+return it completely unchanged. Reply with ONLY the rewritten question, no preamble, no
+quotes, no explanation.
+
+Question: {question}""".strip()
+
 # Real pricing for the configured model, provided by the user (USD per 1M tokens) --
 # not fabricated. Update these if OPENAI_MODEL changes to a different model's pricing.
 PRICE_PER_MILLION_INPUT_TOKENS = 0.75
@@ -84,6 +95,34 @@ TOOLS_BY_NAME = {tool.__name__: tool for tool in TOOLS}
 OPENAI_TOOLS = [convert_function_to_tool(tool).model_dump(exclude_none=True) for tool in TOOLS]
 
 
+def rewrite_query(user_query: str, model: str = MODEL) -> tuple[str, int, int, int, int]:
+    """One extra LLM call that clarifies vague/shorthand phrasing before the question
+    ever reaches baseline retrieval or the tool-calling loop -- e.g. "pikachu evo"
+    becomes "What is Pikachu's evolution chain?". Named entities (Pokémon/move/item/
+    place names) are explicitly instructed to pass through unchanged, since a rewrite
+    that "corrects" a real name into a different real name would silently change the
+    question rather than clarify it.
+
+    Returns (rewritten_query, prompt_tokens, completion_tokens, total_tokens,
+    cached_tokens) -- token counts are real cost of answering the question, not free,
+    so callers must fold them into their own totals rather than discarding them.
+    Falls back to the original query unchanged (with zero token counts) if the rewrite
+    call itself fails for any reason -- a failed rewrite should never block the actual
+    answer.
+    """
+    try:
+        client = OpenAI()
+        response = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": REWRITE_PROMPT.format(question=user_query)}],
+        )
+        rewritten = (response.choices[0].message.content or "").strip()
+        prompt_tokens, completion_tokens, total_tokens, cached_tokens = _usage_totals(response)
+        return (rewritten or user_query), prompt_tokens, completion_tokens, total_tokens, cached_tokens
+    except Exception:
+        return user_query, 0, 0, 0, 0
+
+
 def run_conversation(
     session: Session,
     user_query: str,
@@ -124,11 +163,19 @@ def run_conversation(
 
     client = OpenAI()
 
-    context = retrieve_context(session, user_query)
+    rewritten_query, rw_prompt, rw_completion, rw_total, rw_cached = rewrite_query(user_query, model)
+    prompt_tokens += rw_prompt
+    completion_tokens += rw_completion
+    total_tokens += rw_total
+    cached_tokens += rw_cached
+    if debug and rewritten_query != user_query:
+        print(f"[query rewrite] {user_query!r} -> {rewritten_query!r}")
+
+    context = retrieve_context(session, rewritten_query)
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         *(history or []),
-        {"role": "user", "content": f"Pokédex Context:\n{context}\n\nUser Question: {user_query}"},
+        {"role": "user", "content": f"Pokédex Context:\n{context}\n\nUser Question: {rewritten_query}"},
     ]
 
     # Tracks whether the question was ever answered from real data. retrieve_context()
