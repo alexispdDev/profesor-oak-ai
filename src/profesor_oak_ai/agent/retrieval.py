@@ -1044,3 +1044,4 @@ def list_pokemon_by_color(session: Session, color_name: str) -> list[str]:
         .order_by(PokemonSpecies.species_id)
         .limit(MAX_POKEMON_LISTED)
     ).all()
+    return names

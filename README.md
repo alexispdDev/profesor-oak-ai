@@ -148,7 +148,22 @@ Ground truth: 18 hand-written questions in [`evaluation/ground_truth.jsonl`](eva
 uv run python -m profesor_oak_ai.evaluation.run_eval
 ```
 
-[`evaluation/results.csv`](evaluation/results.csv) holds the latest run's output, but it predates several tool changes (it references at least one tool, `get_held_items`, that no longer exists) — re-run the harness above for current numbers rather than trusting that file as-is.
+[`evaluation/results.csv`](evaluation/results.csv) holds the latest run's output. Relevance is judged by a fresh LLM call each run, so exact numbers shift slightly between runs of the same model.
+
+### Model comparison
+
+The harness also supports comparing models via the `OPENAI_MODEL` env var, so "the best one is used" is an actual measured choice, not just the untested default:
+
+| Model | Retrieval accuracy | RELEVANT | PARTLY_RELEVANT | NON_RELEVANT |
+|---|---|---|---|---|
+| **gpt-5.4-mini** (chosen default) | 16/16 (100%) | 61-67% | 33% | 0-6% |
+| gpt-5.4 (full) | 16/16 (100%) | 44% | 44% | 11% |
+
+```bash
+OPENAI_MODEL=gpt-5.4 uv run python -m profesor_oak_ai.evaluation.run_eval
+```
+
+Both models tie on retrieval accuracy, but gpt-5.4-mini gives a meaningfully better relevance split — and it's the cheaper tier. This comparison is what surfaced a real bug: `retrieval.list_pokemon_by_color` computed its result but never returned it (falling off the end of the function, implicitly returning `None`), silently breaking every "which Pokémon are `<color>`" question regardless of model. Fixed; both models' numbers above are post-fix. The remaining `NON_RELEVANT` cases in both are a known, deliberate trade-off, not this bug: `get_type_effectiveness` is intentionally excluded from counting as "grounded" (to stop the model treating a fictional creature's made-up type as confirmed real), so a bare type-vs-type question with no named creature can never be marked grounded and its correct answer gets overridden by the "insufficient information" fallback every time.
 
 ## Monitoring
 
