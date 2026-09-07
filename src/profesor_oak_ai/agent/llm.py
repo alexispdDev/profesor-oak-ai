@@ -8,8 +8,8 @@ from openai import OpenAI
 from sqlalchemy.orm import Session
 
 from profesor_oak_ai.agent.prompts import SYSTEM_PROMPT
-from profesor_oak_ai.agent.retrieval import NO_MATCH_MESSAGE, retrieve_context
-from profesor_oak_ai.agent.tools import TOOLS, is_failure
+from profesor_oak_ai.agent.retrieval import retrieve_context
+from profesor_oak_ai.agent.tools import NON_GROUNDING_TOOLS, TOOLS, is_failure
 
 # Loads OPENAI_API_KEY (and optionally OPENAI_MODEL) from a .env file if present, without
 # overriding any already-exported real environment variable.
@@ -52,6 +52,12 @@ def _usage_totals(response) -> tuple[int, int, int, int]:
 class ConversationResult:
     answer: str
     tools_called: list[str]
+    # How the answer's subject was confirmed real, for debugging/audit purposes:
+    # "tool" (a name-resolving tool call confirmed it) or "none" (never grounded -- the
+    # answer is either the "insufficient information" fallback or, if the model ignored
+    # rule 3, ungrounded). "context" can still appear on rows persisted before baseline
+    # retrieval stopped pre-fetching species data; the current code never produces it.
+    grounding_source: str
     prompt_tokens: int
     completion_tokens: int
     total_tokens: int
@@ -78,12 +84,30 @@ TOOLS_BY_NAME = {tool.__name__: tool for tool in TOOLS}
 OPENAI_TOOLS = [convert_function_to_tool(tool).model_dump(exclude_none=True) for tool in TOOLS]
 
 
-def run_conversation(session: Session, user_query: str, model: str = MODEL) -> ConversationResult:
+def run_conversation(
+    session: Session,
+    user_query: str,
+    model: str = MODEL,
+    *,
+    debug: bool = False,
+    history: list[dict] | None = None,
+) -> ConversationResult:
     """Runs the tool-calling loop and returns a ConversationResult (answer,
     tool_names_called_in_order, and token usage) -- the tool names are exposed for the
     evaluation harness (profesor_oak_ai.evaluation), which needs to check whether the
     expected tool was actually invoked. ask() below is the plain-answer wrapper every
-    other caller (CLI, future API) should keep using."""
+    other caller (CLI, future API) should keep using. Pass debug=True to print each
+    step's tool calls and results as they happen.
+
+    history, if given, is prior turns as plain {"role": "user"|"assistant", "content":
+    str} pairs (see conversations.load_thread_history), inserted between the system
+    prompt and the current question -- NOT the raw tool_calls/tool messages from those
+    turns. The assistant's own prior answer already carries the essential grounded
+    facts in prose, so this is enough for a follow-up question to make sense of,
+    without the growing token cost of replaying every prior tool
+    call's full output on every subsequent turn. Omit (the default) for a single-turn
+    question with no prior context -- every existing caller of this function relies on
+    that default and needs no changes."""
     tools_called: list[str] = []
     prompt_tokens = completion_tokens = total_tokens = cached_tokens = 0
 
@@ -91,6 +115,7 @@ def run_conversation(session: Session, user_query: str, model: str = MODEL) -> C
         return ConversationResult(
             "OPENAI_API_KEY environment variable is not set -- cannot reach the OpenAI API.",
             tools_called,
+            "none",
             prompt_tokens,
             completion_tokens,
             total_tokens,
@@ -102,14 +127,20 @@ def run_conversation(session: Session, user_query: str, model: str = MODEL) -> C
     context = retrieve_context(session, user_query)
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
+        *(history or []),
         {"role": "user", "content": f"Pokédex Context:\n{context}\n\nUser Question: {user_query}"},
     ]
 
-    # Tracks whether any real data was actually retrieved this turn (baseline context
-    # or a successful tool result). If a tool was tried and every attempt came back
-    # empty, the model tends to answer from its own pretrained knowledge instead of
-    # admitting it doesn't know -- override that instead of trusting it.
-    grounded = context != NO_MATCH_MESSAGE
+    # Tracks whether the question was ever answered from real data. retrieve_context()
+    # deliberately never pre-fetches species data, so this can only become True via a
+    # successful call to a tool not in NON_GROUNDING_TOOLS -- a bare type-name mention
+    # or a get_type_effectiveness call doesn't count, since neither proves the thing the
+    # user asked about exists (e.g. "Bo Jackson" isn't a Pokémon even though "Ground" is
+    # a real type). If a tool was tried and nothing ever grounded the answer, the model
+    # tends to answer from its own pretrained knowledge instead of admitting it doesn't
+    # know -- override that instead of trusting it.
+    grounded = False
+    grounding_source = "none"
     tool_attempted = False
 
     for step in range(1, MAX_TOOL_ITERATIONS + 1):
@@ -125,7 +156,13 @@ def run_conversation(session: Session, user_query: str, model: str = MODEL) -> C
             messages.append({"role": "assistant", "content": message.content})
             answer = NO_INFO_RESPONSE if (tool_attempted and not grounded) else (message.content or "")
             return ConversationResult(
-                answer, tools_called, prompt_tokens, completion_tokens, total_tokens, cached_tokens
+                answer,
+                tools_called,
+                grounding_source,
+                prompt_tokens,
+                completion_tokens,
+                total_tokens,
+                cached_tokens,
             )
 
         tool_attempted = True
@@ -144,7 +181,8 @@ def run_conversation(session: Session, user_query: str, model: str = MODEL) -> C
             }
         )
 
-        print(f"[step {step}] model requested {len(message.tool_calls)} tool call(s):")
+        if debug:
+            print(f"[step {step}] model requested {len(message.tool_calls)} tool call(s):")
         for call in message.tool_calls:
             name = call.function.name
             tools_called.append(name)
@@ -157,15 +195,19 @@ def run_conversation(session: Session, user_query: str, model: str = MODEL) -> C
 
             tool = TOOLS_BY_NAME.get(name)
             result = str(tool(**arguments)) if tool else f"Unknown tool: {name}"
-            if tool and not is_failure(result):
+            if tool and name not in NON_GROUNDING_TOOLS and not is_failure(result):
+                if not grounded:
+                    grounding_source = "tool"
                 grounded = True
-            print(f"  -> {name}({arguments})")
-            print(f"  <- {result}")
+            if debug:
+                print(f"  -> {name}({arguments})")
+                print(f"  <- {result}")
             messages.append({"role": "tool", "tool_call_id": call.id, "content": result})
 
     return ConversationResult(
         "I wasn't able to reach a final answer in time. Please try rephrasing your question.",
         tools_called,
+        grounding_source,
         prompt_tokens,
         completion_tokens,
         total_tokens,

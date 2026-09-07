@@ -28,7 +28,7 @@ Instead of relying solely on the LLM's pre-trained memory, this system grounds i
 ```mermaid
 flowchart TD
     RawData["PokeAPI raw dump<br/>pokemon_raw_data/*.jsonl"]
-    Ingestion["Ingestion pipeline<br/>13 scripts (fetch + 12 populate_*.py)"]
+    Ingestion["Ingestion pipeline<br/>8 scripts (fetch + 7 populate_*.py)"]
     DB[("SQLite<br/>data/pokedex.db<br/>42 tables")]
     Retrieval["retrieval.py<br/>SQLAlchemy queries"]
     Tools["tools.py<br/>9 LLM-callable tools"]
@@ -68,15 +68,10 @@ uv run python -m profesor_oak_ai.ingestion.fetch_raw_data
 uv run python -m profesor_oak_ai.ingestion.populate --max-species-id 151
 uv run python -m profesor_oak_ai.ingestion.populate_from_raw
 uv run python -m profesor_oak_ai.ingestion.populate_colors
-uv run python -m profesor_oak_ai.ingestion.populate_habitats
-uv run python -m profesor_oak_ai.ingestion.populate_shapes
 uv run python -m profesor_oak_ai.ingestion.populate_growth_rates
-uv run python -m profesor_oak_ai.ingestion.populate_egg_groups
 uv run python -m profesor_oak_ai.ingestion.populate_evolutions
-uv run python -m profesor_oak_ai.ingestion.populate_natures
-uv run python -m profesor_oak_ai.ingestion.populate_characteristics
-uv run python -m profesor_oak_ai.ingestion.populate_form_triggers
 uv run python -m profesor_oak_ai.ingestion.populate_location_encounters
+uv run python -m profesor_oak_ai.ingestion.populate_gen1ou_usage
 
 uv run profesor-oak-ai
 ```
@@ -89,7 +84,7 @@ uv run uvicorn profesor_oak_ai.agent.api:app --reload
 
 curl -X POST localhost:8000/question \
   -H 'content-type: application/json' \
-  -d '{"question": "What are Bulbasaur'"'"'s types and abilities?"}'
+  -d '{"question": "What are Bulbasaur'"'"'s types and base stats?"}'
 ```
 Interactive Swagger docs are served at `localhost:8000/docs`.
 
@@ -99,12 +94,12 @@ Interactive Swagger docs are served at `localhost:8000/docs`.
 echo "OPENAI_API_KEY=sk-..." >> .env
 docker compose up --build
 ```
-The container's `entrypoint.sh` runs the same steps as the manual Quickstart above (fetch the raw dump if `pokemon_raw_data/` is empty, apply migrations, populate the database if `data/pokedex.db` doesn't exist yet) before starting the API on `localhost:8000`. `data/` and `pokemon_raw_data/` are bind-mounted from the host, so a first run builds the database once and every subsequent `docker compose up` reuses it and starts almost instantly; deleting either directory forces a rebuild, same as the non-Docker workflow.
+The container's `entrypoint.sh` runs the same steps as the manual Quickstart above (fetch the raw dump if `pokemon_raw_data/` is empty, apply migrations, then run the populate scripts, which are idempotent and skip rows already inserted) before starting the API on `localhost:8000`. `data/` and `pokemon_raw_data/` are bind-mounted from the host, so a first run builds the database once and every subsequent `docker compose up` reruns the populate scripts as a fast no-op instead of rebuilding; deleting either directory forces a rebuild, same as the non-Docker workflow. Running the populate scripts unconditionally (rather than gating on `data/pokedex.db` existing) also means a container that's interrupted mid-ingestion resumes correctly on the next start instead of silently skipping the rest.
 
 Run the CLI through the same image instead:
 ```bash
 docker compose run --rm -it app profesor-oak-ai            # interactive
-docker compose run --rm app profesor-oak-ai "What are Bulbasaur's types and abilities?"  # one-shot
+docker compose run --rm app profesor-oak-ai "What are Bulbasaur's types and base stats?"  # one-shot
 ```
 
 ### Prerequisites
@@ -126,7 +121,7 @@ uv run profesor-oak-ai
 
 One-shot mode (answers a single question and exits, script-friendly):
 ```bash
-uv run profesor-oak-ai "What are Bulbasaur's types and abilities?"
+uv run profesor-oak-ai "What are Bulbasaur's types and base stats?"
 ```
 
 Example:
@@ -159,17 +154,17 @@ This project's retrieval isn't a single ranked-index lookup (like a vector or TF
 - **Retrieval accuracy**: for a ground-truth question with a known expected tool, was that tool actually invoked?
 - **RAG evaluation**: an LLM-as-judge call classifies the final answer as `RELEVANT`, `PARTLY_RELEVANT`, or `NON_RELEVANT`.
 
-Ground truth: 20 hand-written questions, ~2 per tool, in [`evaluation/ground_truth.jsonl`](evaluation/ground_truth.jsonl). Run the harness with:
+Ground truth: 16 hand-written questions, ~2 per tool, in [`evaluation/ground_truth.jsonl`](evaluation/ground_truth.jsonl). Run the harness with:
 ```bash
 uv run python -m profesor_oak_ai.evaluation.run_eval
 ```
 
 Latest results ([`evaluation/results.csv`](evaluation/results.csv)):
 
-- **Retrieval accuracy: 18/18 (100%)** of questions with a known expected tool actually triggered it.
+- **Retrieval accuracy: 14/14 (100%)** of questions with a known expected tool actually triggered it.
 - **RAG relevance: 15/20 (75%) RELEVANT, 5/20 (25%) PARTLY_RELEVANT**, 0 NON_RELEVANT.
 
-The `PARTLY_RELEVANT` cases are mostly the agent correctly reporting a truncated or non-exhaustive list (type/color/shape listings are capped at 30 results by design, and the judge sometimes marks an accurate-but-partial list down for incompleteness) — arguably a labeling artifact of the ground truth, not a real quality issue. Relevance is judged by a fresh LLM call on every run, so this breakdown shifts slightly from run to run (an earlier run classified Gengar's Psychic-weakness explanation as `PARTLY_RELEVANT` because the judge itself was factually wrong about typing interactions); LLM-as-judge evaluation being fallible in this way is a known limitation (see [Limitations](#limitations)).
+The `PARTLY_RELEVANT` cases are mostly the agent correctly reporting a truncated or non-exhaustive list (type/color listings are capped at 30 results by design, and the judge sometimes marks an accurate-but-partial list down for incompleteness) — arguably a labeling artifact of the ground truth, not a real quality issue. Relevance is judged by a fresh LLM call on every run, so this breakdown shifts slightly from run to run (an earlier run classified Gengar's Psychic-weakness explanation as `PARTLY_RELEVANT` because the judge itself was factually wrong about typing interactions); LLM-as-judge evaluation being fallible in this way is a known limitation (see [Limitations](#limitations)).
 
 ## Monitoring
 
@@ -192,7 +187,8 @@ No new service or dependency — it's one FastAPI route rendering plain HTML wit
 - **SQL/keyword retrieval over vector embeddings**: this project used Qdrant + Ollama embeddings for semantic lore search earlier on, then removed it. The dataset is fully structured (a relational Pokédex, not free-text documents), so exact/fuzzy name and keyword matching against SQL columns covers the real query patterns without the operational overhead of an embedding store.
 - **SQLite over Postgres**: conversation/feedback logging reuses the same SQLite database the ingestion pipeline already builds, rather than adding a second database engine — nothing else in this project needs Postgres's concurrency/networking features.
 - **Gen 1-only ingestion scope** (`--max-species-id 151`): the ingestion pipeline can be pointed at more species, but every design decision (which evolution-condition fields to model, which Pokédexes to store numbers for, which type-chart generation to treat as historical) was scoped and verified against Gen 1 specifically. Raising the scope is possible but would need re-auditing several of those decisions.
-- **Past-data tables, not overwritten current data**: where PokeAPI's data changed across generations (type effectiveness, ability availability), the current/modern values are kept as the primary table and historical deltas are stored in separate `Past*` tables (mirroring an existing schema pattern for past types/abilities/stats), rather than overwriting current data or picking one era as canonical.
+- **Types, type-effectiveness, and base stats are all Gen-1-canonical, not "modern is primary"**: a species' type, its full type-effectiveness chart, and its base stats (including a single `special` stat, not the Special Attack/Special Defense split introduced in Gen 2) are all corrected to their real Gen-1 values at ingestion time rather than showing PokeAPI's modern reclassification -- e.g. Clefairy shows as Normal (its real Gen-1 type), not Fairy (its Gen-6 retype); Psychic-types show no Dark-type weakness at all, since Dark didn't exist yet; Charizard shows Special 85, not the modern Sp.Atk 109/Sp.Def 85 split (Game Freak didn't evenly divide the old value when they split it in Gen 2 -- 111 of 151 species diverge). For a Gen-1-only app the *current* PokeAPI value is simply wrong in each of these cases, so ingestion prefers the historical override (`past_damage_relations`/`past_types`/`past_stats`) over the modern one, correcting the primary table directly -- no separate delta table exists anywhere in the schema for this purpose anymore (`PastTypeEfficacy`, `PokemonPastType`, and `PokemonPastStat` were all removed once their data was baked into the primary tables).
+- **Movesets are scoped to Red/Blue/Yellow, not every game a move has ever appeared in**: PokeAPI's per-species movepool spans every generation through the present, so ingestion only keeps a `version_group_details` entry when its game version is Gen 1 (`red-blue`/`yellow`) -- e.g. Charizard's level-up moves are exactly its real Gen-1 set (Ember/Growl/Leer/Scratch at 1, Rage at 24, Slash at 36, Flamethrower at 46, Fire Spin at 55), not padded with moves it only learned via a later TM, egg move, or tutor (neither of the latter two existed yet). A handful of species genuinely learn a move at a different level in Yellow than in Red/Blue (Yellow retuned some movesets to match the anime); both values are kept as separate rows rather than picking one arbitrarily.
 - **`ask()`/`run_conversation()` kept persistence- and evaluation-agnostic**: the core question-answering functions have no knowledge of conversation logging or evaluation. Persistence, judging, and cost tracking live in `conversations.ask_and_log()`, one shared orchestration function that both `cli.py` and `api.py` call — this is what let the HTTP API get added as a thin new caller instead of a rewrite.
 - **FastAPI over Flask for the HTTP API**: the fitness-assistant reference project uses Flask, but this project picked FastAPI instead for built-in request validation (Pydantic) and automatic OpenAPI/Swagger docs (`/docs`), at the cost of diverging from the example's stack.
 - **Bind-mounted `data/`/`pokemon_raw_data/` over named Docker volumes**: this is a single-container, single-machine SQLite setup, not a multi-host deployment, so there's no benefit to hiding the database inside Docker-managed storage. Bind-mounting lets a container reuse whatever's already built on the host (instant startup) and lets a fresh build's output be inspected from outside Docker too.
@@ -215,11 +211,11 @@ src/profesor_oak_ai/
   db/
     engine.py           # SQLite engine/session setup
     models.py            # SQLAlchemy models -- 42 tables
-  ingestion/            # 13 scripts that build the database from the raw PokeAPI dump
+  ingestion/            # 8 scripts that build the database from the raw PokeAPI dump
   evaluation/
     run_eval.py          # Ground-truth-driven retrieval + RAG evaluation harness
 evaluation/
-  ground_truth.jsonl      # 20 hand-written evaluation questions
+  ground_truth.jsonl      # 16 hand-written evaluation questions
   results.csv            # Latest evaluation run's output
 pokemon_raw_data/         # Raw PokeAPI dump (fetched once, offline after that)
 alembic/versions/         # 25 migrations tracking the schema's evolution
@@ -239,5 +235,6 @@ entrypoint.sh             # Fetches/migrates/populates only what's missing, then
 - **Gen 1 species only** by default (`--max-species-id 151`) — the ingestion pipeline can be pointed at more species, but several data-modeling decisions were specifically scoped and verified against Gen 1 (see [Decisions and trade-offs](#decisions-and-trade-offs)).
 - **LLM-as-judge evaluation is itself fallible** — see the Evaluation section above; at least one `PARTLY_RELEVANT` result across evaluation runs has been the judge being factually wrong, not the system under test.
 - **No localization** — only English text is stored anywhere in the schema, even though the raw PokeAPI dump has many languages.
-- **Competitive/team-building judgments are out of reach by design** — the database can answer "what does this ability do" but not "is this a good competitive pick"; that kind of tier/usage data has no source in PokeAPI at all (see `ingestion_gaps.txt`'s "Explicitly out of scope" notes).
+- **Competitive/team-building judgments are out of reach by design** — the database can answer "what type is this Pokémon" but not "is this a good competitive pick"; that kind of tier/usage data has no source in PokeAPI at all (see `ingestion_gaps.txt`'s "Explicitly out of scope" notes).
+- **No ability data** — abilities weren't introduced as a game mechanic until Generation 3, so a Gen-1-only database doesn't model them; PokeAPI's modern retrofit of abilities onto Gen-1 species was ingested at one point, verified, and then removed once this scope conflict was identified (see `ingestion_gaps.txt`).
 - A full, continuously-updated account of known data gaps and scope decisions lives in [`ingestion_gaps.txt`](ingestion_gaps.txt) (data coverage) and [`agent_tool_gaps.txt`](agent_tool_gaps.txt) (tool coverage) — both are more granular and current than this section.

@@ -25,61 +25,12 @@ class GameVersion(Base):
     generation: Mapped[int]
 
 
-class Ability(Base):
-    __tablename__ = "abilities"
-
-    ability_id: Mapped[int] = mapped_column(primary_key=True)
-    name: Mapped[str] = mapped_column(unique=True)
-    description: Mapped[str | None]
-    # Abilities didn't exist as a mechanic before Gen 3 -- a Gen 1 species "having"
-    # a later-generation ability (per modern PokeAPI) is a retrofit, not something
-    # the original games had. This column tracks which generation introduced it.
-    generation: Mapped[int]
-
-
-class AbilityFlavorText(Base):
-    __tablename__ = "ability_flavor_text"
-
-    ability_id: Mapped[int] = mapped_column(
-        ForeignKey("abilities.ability_id", ondelete="CASCADE"), primary_key=True
-    )
-    # Plain string, not an FK -- keyed by version_group (e.g. "ruby-sapphire"), not
-    # an individual game_versions row; no VersionGroup table exists in this schema
-    # (same choice already made for SpeciesEvolution.version_group).
-    version_group: Mapped[str] = mapped_column(primary_key=True)
-    flavor_text: Mapped[str]
-
-
-class AbilityEffectChange(Base):
-    __tablename__ = "ability_effect_changes"
-
-    ability_id: Mapped[int] = mapped_column(
-        ForeignKey("abilities.ability_id", ondelete="CASCADE"), primary_key=True
-    )
-    version_group: Mapped[str] = mapped_column(primary_key=True)
-    effect: Mapped[str]
-
-
 class TypeEfficacy(Base):
     __tablename__ = "type_efficacy"
     __table_args__ = (
         CheckConstraint("damage_factor IN (0, 0.5, 1, 2)", name="ck_type_efficacy_damage_factor"),
     )
 
-    damage_type_id: Mapped[int] = mapped_column(ForeignKey("types.type_id"), primary_key=True)
-    target_type_id: Mapped[int] = mapped_column(ForeignKey("types.type_id"), primary_key=True)
-    damage_factor: Mapped[float]
-
-
-class PastTypeEfficacy(Base):
-    __tablename__ = "past_type_efficacy"
-    __table_args__ = (
-        CheckConstraint("damage_factor IN (0, 0.5, 1, 2)", name="ck_past_type_efficacy_damage_factor"),
-    )
-
-    # Only rows that differ from the current TypeEfficacy chart are stored, same
-    # "only store the delta" convention as PokemonPastType/PastAbility/PastStat.
-    generation: Mapped[int] = mapped_column(primary_key=True)
     damage_type_id: Mapped[int] = mapped_column(ForeignKey("types.type_id"), primary_key=True)
     target_type_id: Mapped[int] = mapped_column(ForeignKey("types.type_id"), primary_key=True)
     damage_factor: Mapped[float]
@@ -107,34 +58,6 @@ class Move(Base):
     type: Mapped[PokemonType] = relationship()
 
 
-class Nature(Base):
-    __tablename__ = "natures"
-
-    nature_id: Mapped[int] = mapped_column(primary_key=True)
-    name: Mapped[str] = mapped_column(unique=True)
-    # Stat/flavor names as plain strings, not FKs -- this schema has no Stat or
-    # BerryFlavor lookup table (base stats are plain columns on pokemon_forms;
-    # berry-flavor.jsonl is outside this project's core ingestion scope).
-    increased_stat: Mapped[str | None]
-    decreased_stat: Mapped[str | None]
-    likes_flavor: Mapped[str | None]
-    hates_flavor: Mapped[str | None]
-
-
-class Characteristic(Base):
-    __tablename__ = "characteristics"
-    __table_args__ = (
-        Index("ux_characteristics_stat_modulo", "highest_stat", "gene_modulo", unique=True),
-    )
-
-    characteristic_id: Mapped[int] = mapped_column(primary_key=True)
-    # PokeAPI gives this resource no `name` slug -- (highest_stat, gene_modulo) is
-    # the real identity; description is a plain display field, not the key.
-    highest_stat: Mapped[str]
-    gene_modulo: Mapped[int]
-    description: Mapped[str]
-
-
 class PokemonSpecies(Base):
     __tablename__ = "pokemon_species"
 
@@ -143,9 +66,6 @@ class PokemonSpecies(Base):
     generation: Mapped[int]
     is_legendary: Mapped[bool] = mapped_column(default=False)
     is_mythical: Mapped[bool] = mapped_column(default=False)
-    # Eighths chance of being female: -1 = genderless, 0 = always male,
-    # 8 = always female, e.g. 1 = 12.5% female / 87.5% male.
-    gender_rate: Mapped[int]
     evolves_from_species_id: Mapped[int | None] = mapped_column(
         ForeignKey("pokemon_species.species_id")
     )
@@ -206,18 +126,18 @@ class PokemonForm(Base):
     sprite_url: Mapped[str | None]
     base_experience: Mapped[int | None]
     order: Mapped[int | None]
-    is_mega: Mapped[bool] = mapped_column(default=False)
-    is_battle_only: Mapped[bool] = mapped_column(default=False)
 
     hp: Mapped[int]
     attack: Mapped[int]
     defense: Mapped[int]
-    special_attack: Mapped[int]
-    special_defense: Mapped[int]
+    # Gen 1 had a single Special stat, not the Special Attack/Special Defense split
+    # introduced in Gen 2 -- and the split wasn't an even division of the old value,
+    # so this must be sourced from history, not derived from the modern fields.
+    special: Mapped[int]
     speed: Mapped[int]
     base_stat_total: Mapped[int] = mapped_column(
         Computed(
-            "hp + attack + defense + special_attack + special_defense + speed",
+            "hp + attack + defense + special + speed",
             persisted=True,
         )
     )
@@ -238,25 +158,24 @@ class PokemonTypeAssociation(Base):
     slot: Mapped[int]
 
 
-class PokemonAbility(Base):
-    __tablename__ = "pokemon_abilities"
-
-    form_id: Mapped[int] = mapped_column(
-        ForeignKey("pokemon_forms.form_id", ondelete="CASCADE"), primary_key=True
-    )
-    ability_id: Mapped[int] = mapped_column(
-        ForeignKey("abilities.ability_id", ondelete="CASCADE"), primary_key=True
-    )
-    slot: Mapped[int]
-    is_hidden: Mapped[bool] = mapped_column(default=False)
-
-
 class PokemonMove(Base):
     __tablename__ = "pokemon_moves"
     __table_args__ = (
         CheckConstraint(
             "learn_method IN ('level-up', 'machine', 'egg', 'tutor')",
             name="ck_pokemon_moves_learn_method",
+        ),
+        # PokeAPI reports move learnsets per version_group, not per individual game --
+        # Red and Blue are always identical for move data (there's no version-exclusive
+        # moveset the way there is for location encounters), so "red-blue" is one unit
+        # and "yellow" is the other. A real, meaningful distinction: some Gen-1 moves
+        # (e.g. Charizard's Fly) are only learnable starting in Yellow, a well-known
+        # oversight patched after Red/Blue shipped -- collapsing the two into one
+        # undifferentiated learnset (as this table used to) reports those as available
+        # in Red/Blue when they aren't.
+        CheckConstraint(
+            "version_group IN ('red-blue', 'yellow')",
+            name="ck_pokemon_moves_version_group",
         ),
     )
 
@@ -268,17 +187,7 @@ class PokemonMove(Base):
     )
     learn_method: Mapped[str] = mapped_column(primary_key=True)
     level_learned_at: Mapped[int] = mapped_column(primary_key=True, default=0)
-
-
-class PokemonEnrichment(Base):
-    __tablename__ = "pokemon_enrichment"
-
-    form_id: Mapped[int] = mapped_column(
-        ForeignKey("pokemon_forms.form_id", ondelete="CASCADE"), primary_key=True
-    )
-    physical_traits: Mapped[str | None]
-    model_name: Mapped[str | None]
-    generated_at: Mapped[datetime] = mapped_column(server_default=text("CURRENT_TIMESTAMP"))
+    version_group: Mapped[str] = mapped_column(primary_key=True)
 
 
 class Item(Base):
@@ -286,19 +195,6 @@ class Item(Base):
 
     item_id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(unique=True)
-
-
-class PokemonHeldItem(Base):
-    __tablename__ = "pokemon_held_items"
-
-    form_id: Mapped[int] = mapped_column(
-        ForeignKey("pokemon_forms.form_id", ondelete="CASCADE"), primary_key=True
-    )
-    item_id: Mapped[int] = mapped_column(
-        ForeignKey("items.item_id", ondelete="CASCADE"), primary_key=True
-    )
-    version_id: Mapped[int] = mapped_column(ForeignKey("game_versions.version_id"), primary_key=True)
-    rarity: Mapped[int]
 
 
 class PokemonGameIndex(Base):
@@ -309,45 +205,6 @@ class PokemonGameIndex(Base):
     )
     version_id: Mapped[int] = mapped_column(ForeignKey("game_versions.version_id"), primary_key=True)
     game_index: Mapped[int]
-
-
-class PokemonPastType(Base):
-    __tablename__ = "pokemon_past_types"
-    __table_args__ = (CheckConstraint("slot IN (1, 2)", name="ck_pokemon_past_types_slot"),)
-
-    form_id: Mapped[int] = mapped_column(
-        ForeignKey("pokemon_forms.form_id", ondelete="CASCADE"), primary_key=True
-    )
-    generation: Mapped[int] = mapped_column(primary_key=True)
-    slot: Mapped[int] = mapped_column(primary_key=True)
-    type_id: Mapped[int] = mapped_column(ForeignKey("types.type_id"))
-
-
-class PokemonPastAbility(Base):
-    __tablename__ = "pokemon_past_abilities"
-
-    form_id: Mapped[int] = mapped_column(
-        ForeignKey("pokemon_forms.form_id", ondelete="CASCADE"), primary_key=True
-    )
-    generation: Mapped[int] = mapped_column(primary_key=True)
-    slot: Mapped[int] = mapped_column(primary_key=True)
-    ability_id: Mapped[int] = mapped_column(ForeignKey("abilities.ability_id"))
-    is_hidden: Mapped[bool] = mapped_column(default=False)
-
-
-class PokemonPastStat(Base):
-    __tablename__ = "pokemon_past_stats"
-
-    form_id: Mapped[int] = mapped_column(
-        ForeignKey("pokemon_forms.form_id", ondelete="CASCADE"), primary_key=True
-    )
-    generation: Mapped[int] = mapped_column(primary_key=True)
-    # No CHECK constraint here: past stats can use legacy stat names (e.g. "special",
-    # Gen 1's single stat before it split into special-attack/special-defense in Gen 2)
-    # that aren't among the 6 current stat names used elsewhere in this schema.
-    stat_name: Mapped[str] = mapped_column(primary_key=True)
-    base_stat: Mapped[int]
-    effort: Mapped[int]
 
 
 class PokemonCries(Base):
@@ -378,43 +235,6 @@ class PokemonColorAssociation(Base):
     color_id: Mapped[int] = mapped_column(ForeignKey("colors.color_id"))
 
 
-class Shape(Base):
-    __tablename__ = "shapes"
-
-    shape_id: Mapped[int] = mapped_column(primary_key=True)
-    name: Mapped[str] = mapped_column(unique=True)
-    # Fancy anatomical nickname, e.g. "Mensal" for quadruped, "Anthropomorphic" for
-    # humanoid -- genuinely distinct from name, not just a rephrasing of it.
-    awesome_name: Mapped[str | None]
-
-
-class PokemonShapeAssociation(Base):
-    __tablename__ = "pokemon_shapes"
-
-    # species_id alone as PK (not composite with shape_id): a species has at most
-    # one shape, same 1:1 reasoning as PokemonColorAssociation.
-    species_id: Mapped[int] = mapped_column(
-        ForeignKey("pokemon_species.species_id", ondelete="CASCADE"), primary_key=True
-    )
-    shape_id: Mapped[int] = mapped_column(ForeignKey("shapes.shape_id"))
-
-
-class Habitat(Base):
-    __tablename__ = "habitats"
-
-    habitat_id: Mapped[int] = mapped_column(primary_key=True)
-    name: Mapped[str] = mapped_column(unique=True)
-
-
-class PokemonHabitatAssociation(Base):
-    __tablename__ = "pokemon_habitats"
-
-    # species_id alone as PK (not composite with habitat_id): a species has at most
-    # one habitat, same 1:1 reasoning as PokemonColorAssociation.
-    species_id: Mapped[int] = mapped_column(
-        ForeignKey("pokemon_species.species_id", ondelete="CASCADE"), primary_key=True
-    )
-    habitat_id: Mapped[int] = mapped_column(ForeignKey("habitats.habitat_id"))
 
 
 class GrowthRate(Base):
@@ -428,7 +248,7 @@ class PokemonGrowthRateAssociation(Base):
     __tablename__ = "pokemon_growth_rates"
 
     # species_id alone as PK: a species has at most one growth rate, same 1:1
-    # reasoning as PokemonColorAssociation/PokemonHabitatAssociation.
+    # reasoning as PokemonColorAssociation.
     species_id: Mapped[int] = mapped_column(
         ForeignKey("pokemon_species.species_id", ondelete="CASCADE"), primary_key=True
     )
@@ -443,26 +263,6 @@ class GrowthRateLevel(Base):
     )
     level: Mapped[int] = mapped_column(primary_key=True)
     experience: Mapped[int]
-
-
-class EggGroup(Base):
-    __tablename__ = "egg_groups"
-
-    egg_group_id: Mapped[int] = mapped_column(primary_key=True)
-    name: Mapped[str] = mapped_column(unique=True)
-
-
-class PokemonEggGroupAssociation(Base):
-    __tablename__ = "pokemon_egg_groups"
-
-    # Composite PK (not species_id alone): unlike color/habitat/growth_rate, a
-    # species can belong to up to 2 egg groups (verified: 279/1025 species have 2).
-    species_id: Mapped[int] = mapped_column(
-        ForeignKey("pokemon_species.species_id", ondelete="CASCADE"), primary_key=True
-    )
-    egg_group_id: Mapped[int] = mapped_column(
-        ForeignKey("egg_groups.egg_group_id"), primary_key=True
-    )
 
 
 class Location(Base):
@@ -492,18 +292,6 @@ class PokemonLocationEncounter(Base):
     chance: Mapped[int]
 
 
-class PokemonFormTrigger(Base):
-    __tablename__ = "pokemon_form_triggers"
-
-    form_id: Mapped[int] = mapped_column(
-        ForeignKey("pokemon_forms.form_id", ondelete="CASCADE"), primary_key=True
-    )
-    # "held-item", "gigantamax-factor", "move", "ability", "consumed-item", "key-item".
-    trigger_type: Mapped[str] = mapped_column(primary_key=True)
-    # e.g. "venusaurite" for a held-item trigger; null for gigantamax-factor (no item).
-    trigger_name: Mapped[str | None]
-
-
 class SpeciesEvolution(Base):
     __tablename__ = "species_evolutions"
     __table_args__ = (
@@ -529,14 +317,12 @@ class SpeciesEvolution(Base):
     species_id: Mapped[int] = mapped_column(
         ForeignKey("pokemon_species.species_id", ondelete="CASCADE")
     )
-    # Named trigger_type (not "trigger", a SQLite reserved word) -- matches the
-    # existing PokemonFormTrigger.trigger_type naming.
+    # Named trigger_type, not "trigger" -- a SQLite reserved word.
     trigger_type: Mapped[str]
     version_group: Mapped[str]
     is_default: Mapped[bool] = mapped_column(default=True)
     min_level: Mapped[int | None]
     item_id: Mapped[int | None] = mapped_column(ForeignKey("items.item_id"))
-    held_item_id: Mapped[int | None] = mapped_column(ForeignKey("items.item_id"))
     known_move_id: Mapped[int | None] = mapped_column(ForeignKey("moves.move_id"))
     min_happiness: Mapped[int | None]
     time_of_day: Mapped[str | None]
@@ -548,11 +334,34 @@ class SpeciesEvolution(Base):
     evolved_form_id: Mapped[int | None] = mapped_column(ForeignKey("pokemon_forms.form_id"))
 
 
+class Gen1ouUsageMove(Base):
+    __tablename__ = "gen1ou_usage_moves"
+
+    # A single Smogon Generation 1 OU usage-stats snapshot (14,136 rated battles, 1760
+    # rating cutoff -- see pokemon_raw_data/gen1ou-1760.json) covers only 62 of the 151
+    # Gen-1 species, so species_id being part of the PK (not a dex-wide 1:1 pattern like
+    # PokemonColorAssociation) means only those 62 species have any row here at all --
+    # that's also how team_builder.viable_pool identifies real-usage pool membership,
+    # with no separate species-level table needed.
+    species_id: Mapped[int] = mapped_column(
+        ForeignKey("pokemon_species.species_id", ondelete="CASCADE"), primary_key=True
+    )
+    move_id: Mapped[int] = mapped_column(ForeignKey("moves.move_id", ondelete="CASCADE"), primary_key=True)
+    # Precomputed from the raw snapshot's weighted move count divided by that species'
+    # weighted total (the sum of its Abilities/Items/Spreads breakdown -- Gen 1 has no
+    # abilities/items to actually vary, so every entry there is a single dummy value
+    # that sums to the species' true weighted appearance total; "Raw count" is a
+    # different, unweighted number and is NOT the right denominator). The raw weight has
+    # no independent meaning outside that one division, so only the resulting
+    # percentage is stored.
+    usage_percent: Mapped[float]
+
+
 class Conversation(Base):
     __tablename__ = "conversations"
 
     # String (UUID) PK generated in application code, not autoincrement -- needed so
-    # it can be handed back to the caller immediately and referenced later for feedback.
+    # it can be handed back to the caller immediately.
     conversation_id: Mapped[str] = mapped_column(primary_key=True)
     question: Mapped[str]
     answer: Mapped[str]
@@ -572,17 +381,17 @@ class Conversation(Base):
     eval_total_tokens: Mapped[int | None]
     cost: Mapped[float | None]
 
+    # How the answer's subject was confirmed real: "context" (baseline retrieval before
+    # the model's first turn), "tool" (a name-resolving tool call), or "none" (never
+    # grounded). NULL for conversations logged before this tracking existed.
+    grounding_source: Mapped[str | None]
 
-class Feedback(Base):
-    __tablename__ = "feedback"
-    __table_args__ = (CheckConstraint("rating IN (-1, 1)", name="ck_feedback_rating"),)
-
-    feedback_id: Mapped[int] = mapped_column(primary_key=True)
-    conversation_id: Mapped[str] = mapped_column(
-        ForeignKey("conversations.conversation_id", ondelete="CASCADE")
-    )
-    rating: Mapped[int]
-    created_at: Mapped[datetime] = mapped_column(server_default=text("CURRENT_TIMESTAMP"))
+    # Groups multiple turns of one ongoing exchange -- the first turn's thread_id
+    # equals its own conversation_id (self-referencing root); later turns in the
+    # same thread reuse that value, letting history be reconstructed with
+    # "WHERE thread_id = ? ORDER BY created_at" instead of a separate table. NULL
+    # for conversations logged before multi-turn memory existed.
+    thread_id: Mapped[str | None] = mapped_column(index=True)
 
 
 Index("idx_pokemon_forms_species", PokemonForm.species_id)

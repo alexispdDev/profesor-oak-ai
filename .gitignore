@@ -3,7 +3,13 @@
 *.db
 *.db-journal
 *.sqlite3
-/pokemon_raw_data/
+/pokemon_raw_data/*
+# Exception: a single hand-added Smogon Gen1-OU usage-stats snapshot, not produced
+# by fetch_raw_data.py -- tracked so every install has real competitive-usage data
+# without a manual step (see populate_gen1ou_usage.py). Ignoring the directory's
+# contents (not the directory itself, via the trailing "*" above) so this negation
+# actually works -- git won't descend into an ignored directory to apply one.
+!/pokemon_raw_data/gen1ou-1760.json
 /data/qdrant/
 
 # Python-generated files
