@@ -42,7 +42,11 @@ def insert_encounters_for_form(
     inserted = 0
 
     for loc in locations:
-        location_id = get_or_create_location(session, location_cache, loc["location_area"]["name"])
+        # Lazily create the location only once we know it has a real Gen-1
+        # encounter -- version_map is Gen-1-only, so a purely later-game area
+        # (e.g. Lumiose City, a Galar Max Raid Den) never resolves a version_id
+        # and never gets a Location row created for it at all.
+        location_id: int | None = None
 
         for version_detail in loc["version_details"]:
             version_id = version_map.get(version_detail["version"]["name"])
@@ -50,6 +54,10 @@ def insert_encounters_for_form(
                 continue
 
             for encounter in version_detail["encounter_details"]:
+                if location_id is None:
+                    location_id = get_or_create_location(
+                        session, location_cache, loc["location_area"]["name"]
+                    )
                 key = (
                     location_id,
                     version_id,
@@ -80,7 +88,13 @@ def insert_encounters_for_form(
 def populate_location_encounters(session: Session) -> None:
     form_lookup = build_form_lookup(session)
     pokemon_id_to_name = build_pokemon_id_to_name(RAW_DATA_DIR / "pokemon.jsonl")
-    version_map = load_name_id_map(session, GameVersion, "version_id")
+    # Gen-1-only, not every game version -- pokemon_location_areas.jsonl covers
+    # every game a species has ever appeared in (remakes, spinoffs, modern
+    # titles), but this table must contain only Gen-1 data.
+    version_map = {
+        row.name: row.version_id
+        for row in session.scalars(select(GameVersion).where(GameVersion.generation == 1)).all()
+    }
     location_cache = load_name_id_map(session, Location, "location_id")
 
     processed = 0
