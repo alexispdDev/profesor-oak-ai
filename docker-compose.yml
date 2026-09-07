@@ -7,4 +7,3 @@ services:
       - .env
     volumes:
       - ./data:/app/data
-      - ./pokemon_raw_data:/app/pokemon_raw_data

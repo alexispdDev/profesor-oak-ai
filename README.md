@@ -27,9 +27,7 @@ Instead of relying solely on the LLM's pre-trained memory, this system grounds i
 
 ```mermaid
 flowchart TD
-    RawData["PokeAPI raw dump<br/>pokemon_raw_data/*.jsonl"]
-    Ingestion["Ingestion pipeline<br/>8 scripts (fetch + 7 populate_*.py)"]
-    DB[("SQLite<br/>data/pokedex.db<br/>23 tables")]
+    DB[("SQLite<br/>data/pokedex.db<br/>shipped pre-built")]
     Retrieval["retrieval.py<br/>SQLAlchemy queries"]
     Tools["tools.py<br/>19 LLM-callable tools"]
     LLM["llm.py<br/>OpenAI tool-calling loop"]
@@ -39,7 +37,6 @@ flowchart TD
     Eval["evaluation/<br/>ground truth + LLM-judge"]
     User["User"]
 
-    RawData --> Ingestion --> DB
     DB --> Retrieval --> Tools --> LLM
     DB -.direct query via team_builder.-> Tools
     Retrieval -.baseline context.-> LLM
@@ -64,16 +61,9 @@ Every question first gets a baseline context block injected automatically (`retr
 uv sync
 echo "OPENAI_API_KEY=sk-..." >> .env
 
-# build the database (fetches the PokeAPI dump once, then ingests it offline)
+# data/pokedex.db ships pre-built and fully ingested -- this just applies any
+# migrations newer than the shipped snapshot (usually a no-op)
 uv run alembic upgrade head
-uv run python -m profesor_oak_ai.ingestion.fetch_raw_data
-uv run python -m profesor_oak_ai.ingestion.populate --max-species-id 151
-uv run python -m profesor_oak_ai.ingestion.populate_from_raw
-uv run python -m profesor_oak_ai.ingestion.populate_colors
-uv run python -m profesor_oak_ai.ingestion.populate_growth_rates
-uv run python -m profesor_oak_ai.ingestion.populate_evolutions
-uv run python -m profesor_oak_ai.ingestion.populate_location_encounters
-uv run python -m profesor_oak_ai.ingestion.populate_gen1ou_usage
 
 uv run profesor-oak-ai
 ```
@@ -96,7 +86,7 @@ Interactive Swagger docs are served at `localhost:8000/docs`.
 echo "OPENAI_API_KEY=sk-..." >> .env
 docker compose up --build
 ```
-The container's `entrypoint.sh` runs the same steps as the manual Quickstart above (fetch the raw dump if `pokemon_raw_data/` is empty, apply migrations, then run the populate scripts, which are idempotent and skip rows already inserted) before starting the API on `localhost:8000`. `data/` and `pokemon_raw_data/` are bind-mounted from the host, so a first run builds the database once and every subsequent `docker compose up` reruns the populate scripts as a fast no-op instead of rebuilding; deleting either directory forces a rebuild, same as the non-Docker workflow. Running the populate scripts unconditionally (rather than gating on `data/pokedex.db` existing) also means a container that's interrupted mid-ingestion resumes correctly on the next start instead of silently skipping the rest.
+The container's `entrypoint.sh` just applies migrations against the shipped `data/pokedex.db` before starting the API on `localhost:8000`. `data/` is bind-mounted from the host, so conversation history persists across container restarts and the database can be inspected from outside Docker too.
 
 Run the CLI through the same image instead:
 ```bash
@@ -110,7 +100,7 @@ docker compose run --rm app profesor-oak-ai "What are Bulbasaur's types and base
 - [uv](https://docs.astral.sh/uv/) for dependency management
 - An OpenAI API key
 
-The ingestion scripts are idempotent (safe to re-run; each one skips rows it's already inserted) and offline after the one `fetch_raw_data` step — everything else reads only from the `pokemon_raw_data/` dump, no further network access. `data/pokedex.db` is gitignored and disposable: delete it and re-run the steps above to rebuild from scratch.
+`data/pokedex.db` is committed to this repo, already fully ingested — there's no ingestion pipeline in this repo to rebuild it from scratch. `alembic upgrade head` only needs to run to pick up any schema migrations added after the snapshot was taken.
 
 ## Testing
 
@@ -179,14 +169,14 @@ No new service or dependency — it's one FastAPI route rendering plain HTML wit
 
 ## Decisions and trade-offs
 
+- **Shipped, pre-built database over an in-repo ingestion pipeline**: `data/pokedex.db` is committed directly rather than reproducible from tracked ingestion scripts. A full fetch-from-PokeAPI-and-populate pipeline existed earlier and produced this database, but ran into real-world friction (a fresh clone's setup time dominated by rate-limited network calls to PokeAPI) that outweighed the benefit of reproducibility for a dataset that only needs to be built once. The trade-off: no way to rebuild from scratch or extend to more species from this repo alone (see [Limitations](#limitations)).
 - **SQL/keyword retrieval over vector embeddings**: this project used Qdrant + Ollama embeddings for semantic lore search earlier on, then removed it. The dataset is fully structured (a relational Pokédex, not free-text documents), so exact/fuzzy name and keyword matching against SQL columns covers the real query patterns without the operational overhead of an embedding store.
-- **SQLite over Postgres**: conversation logging reuses the same SQLite database the ingestion pipeline already builds, rather than adding a second database engine — nothing else in this project needs Postgres's concurrency/networking features.
-- **Gen 1-only ingestion scope** (`--max-species-id 151`): the ingestion pipeline can be pointed at more species, but every design decision (which evolution-condition fields to model, which Pokédexes to store numbers for, which type-chart generation to treat as historical) was scoped and verified against Gen 1 specifically. Raising the scope is possible but would need re-auditing several of those decisions.
-- **Movesets are scoped to Red/Blue/Yellow, not every game a move has ever appeared in**: PokeAPI's per-species movepool spans every generation through the present, so ingestion only keeps a `version_group_details` entry when its game version is Gen 1 (`red-blue`/`yellow`) -- e.g. Charizard's level-up moves are exactly its real Gen-1 set (Ember/Growl/Leer/Scratch at 1, Rage at 24, Slash at 36, Flamethrower at 46, Fire Spin at 55), not padded with moves it only learned via a later TM, egg move, or tutor (neither of the latter two existed yet). A handful of species genuinely learn a move at a different level in Yellow than in Red/Blue (Yellow retuned some movesets to match the anime); both values are kept as separate rows rather than picking one arbitrarily.
+- **SQLite over Postgres**: conversation logging reuses the same SQLite database the app already ships with, rather than adding a second database engine — nothing else in this project needs Postgres's concurrency/networking features.
+- **Gen 1-only in scope**: the database (and every design decision behind it — which evolution-condition fields to model, which Pokédexes to store numbers for, which type-chart generation to treat as historical) was built and verified against Gen 1 specifically, not built to be trivially re-scoped to later generations.
+- **Movesets are scoped to Red/Blue/Yellow, not every game a move has ever appeared in**: PokeAPI's per-species movepool spans every generation through the present, so only a `version_group_details` entry whose game version is Gen 1 (`red-blue`/`yellow`) was kept -- e.g. Charizard's level-up moves are exactly its real Gen-1 set (Ember/Growl/Leer/Scratch at 1, Rage at 24, Slash at 36, Flamethrower at 46, Fire Spin at 55), not padded with moves it only learned via a later TM, egg move, or tutor (neither of the latter two existed yet). A handful of species genuinely learn a move at a different level in Yellow than in Red/Blue (Yellow retuned some movesets to match the anime); both values are kept as separate rows rather than picking one arbitrarily.
 - **`ask()`/`run_conversation()` kept persistence- and evaluation-agnostic**: the core question-answering functions have no knowledge of conversation logging or evaluation. Persistence, judging, and cost tracking live in `conversations.ask_and_log()`, one shared orchestration function that both `cli.py` and `api.py` call — this is what let the HTTP API get added as a thin new caller instead of a rewrite.
 - **FastAPI over Flask for the HTTP API**: the fitness-assistant reference project uses Flask, but this project picked FastAPI instead for built-in request validation (Pydantic) and automatic OpenAPI/Swagger docs (`/docs`), at the cost of diverging from the example's stack.
-- **Bind-mounted `data/`/`pokemon_raw_data/` over named Docker volumes**: this is a single-container, single-machine SQLite setup, not a multi-host deployment, so there's no benefit to hiding the database inside Docker-managed storage. Bind-mounting lets a container reuse whatever's already built on the host (instant startup) and lets a fresh build's output be inspected from outside Docker too.
-- **One idempotent `entrypoint.sh` for both the API and CLI**: it checks for existing data, fetches/migrates/populates only what's missing (reusing the exact Quickstart command list, not a re-derived one), then `exec`s whatever command was passed in — so `docker compose up` (the API) and `docker compose run app profesor-oak-ai ...` (the CLI) share one bootstrap path instead of two.
+- **Bind-mounted `data/` over a named Docker volume**: this is a single-container, single-machine SQLite setup, not a multi-host deployment, so there's no benefit to hiding the database inside Docker-managed storage. Bind-mounting lets conversation history persist across container restarts and lets the database be inspected from outside Docker too.
 - **Built-in HTML dashboard over Grafana**: the fitness-assistant reference project uses Grafana against Postgres. This project's data lives in SQLite, and Grafana's SQLite support is an unsigned community plugin rather than a first-class data source — adding it (plus a new docker-compose service) for a handful of read-only aggregate queries was more infra than the payoff justified. A single FastAPI route querying the existing tables directly avoids that fragility, at the cost of a less polished/interactive UI than Grafana would give. Note that per-tool usage (which of the 19 tools got called) isn't a metric this dashboard can show, since that's never persisted per conversation — only the final answer, relevance, and token/cost counts are.
 
 ## Limitations
@@ -195,5 +185,6 @@ No new service or dependency — it's one FastAPI route rendering plain HTML wit
 - **No web UI** — the CLI and the HTTP API (`api.py`) are the only interfaces; no frontend.
 - **No per-tool usage tracking** — `GET /dashboard` can't show "most-used tool" or similar, because which of the 19 tools got called per conversation is never persisted (only used transiently during the request); would need a schema change to track.
 - **LLM-as-judge evaluation is itself fallible** — see the Evaluation section above; at least one `PARTLY_RELEVANT` result across evaluation runs has been the judge being factually wrong, not the system under test.
-- **No localization** — only English text is stored anywhere in the schema, even though the raw PokeAPI dump has many languages.
-- **Team-building is grounded in a single, frozen usage snapshot** — `build_team` reasons from one Smogon Gen1-OU usage-stats snapshot (`pokemon_raw_data/gen1ou-1760.json`, 62 of 151 species covered), not a live or continuously-updated source; its real-usage pool and pervasiveness numbers only reflect that snapshot.
+- **No localization** — only English text is stored anywhere in the schema, even though the original PokeAPI data has many languages.
+- **Team-building is grounded in a single, frozen usage snapshot** — `build_team` reasons from one Smogon Gen1-OU usage-stats snapshot baked into the shipped database at build time (62 of 151 species covered), not a live or continuously-updated source; its real-usage pool and pervasiveness numbers only reflect that snapshot.
+- **No ingestion pipeline in this repo** — `data/pokedex.db` is shipped pre-built; there's no tracked way to rebuild it from scratch, extend it to more species, or refresh it against a newer PokeAPI/Smogon snapshot without recreating that pipeline.

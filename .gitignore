@@ -3,13 +3,12 @@
 *.db
 *.db-journal
 *.sqlite3
-/pokemon_raw_data/*
-# Exception: a single hand-added Smogon Gen1-OU usage-stats snapshot, not produced
-# by fetch_raw_data.py -- tracked so every install has real competitive-usage data
-# without a manual step (see populate_gen1ou_usage.py). Ignoring the directory's
-# contents (not the directory itself, via the trailing "*" above) so this negation
-# actually works -- git won't descend into an ignored directory to apply one.
-!/pokemon_raw_data/gen1ou-1760.json
+# Exception: the pre-built, fully-ingested database is shipped directly -- there's no
+# ingestion pipeline in this repo anymore to rebuild it from scratch, so ignoring it
+# like any other local SQLite file (via the blanket "*.db" above) would leave a fresh
+# clone with no database at all.
+!/data/pokedex.db
+/pokemon_raw_data/
 /data/qdrant/
 
 # Python-generated files
